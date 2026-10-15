@@ -2,6 +2,7 @@ import {rad,median,sd,mean,faceRotation,headInclination,measureIris} from './geo
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
+const APP_VERSION='0.1.1';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
@@ -12,7 +13,7 @@ const portrait=()=>Math.abs(screenAngle()%180)<1;
 const state={running:false,starting:false,stream:null,worker:null,detector:null,mode:null,generation:0,
   orientation:null,motion:null,baseline:null,calibration:null,collect:null,latest:null,pending:null,
   nextId:0,lastFrame:0,lastVideoTime:-1,frames:[],session:null,recording:false,dirty:false,wake:null,
-  imageSize:null,timer:null,storageOK:true,saveBusy:false,lastCheckpoint:0,saved:{frames:0,motion:0,orientation:0,events:0},chunk:1};
+  imageSize:null,timer:null,storageOK:true,saveBusy:false,saveTask:null,recordStarting:false,awaitingNext:false,archives:new Map(),lastCheckpoint:0,saved:{frames:0,motion:0,orientation:0,events:0},chunk:1};
 
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error);}
 function event(type,detail={}){if(state.recording)state.session.events.push({t:performance.now(),type,...detail});}
@@ -104,7 +105,7 @@ $('start').addEventListener('click',async()=>{
     await createDetector();
     state.running=true;state.generation++;state.baseline=null;state.calibration=null;state.lastVideoTime=-1;state.lastFrame=0;
     $('modelStatus').textContent=`顔推定：${state.mode}`;
-    $('diagnostics').textContent=JSON.stringify({app:'posture-lab/0.1',mediapipe:MP_VERSION,model:MODEL,browser:navigator.userAgent,settings:state.cameraSettings,supportedConstraints:navigator.mediaDevices.getSupportedConstraints(),screenAngle:screenAngle(),inference:state.mode},null,2);
+    $('diagnostics').textContent=JSON.stringify({app:`posture-lab/${APP_VERSION}`,mediapipe:MP_VERSION,model:MODEL,browser:navigator.userAgent,settings:state.cameraSettings,supportedConstraints:navigator.mediaDevices.getSupportedConstraints(),screenAngle:screenAngle(),inference:state.mode},null,2);
     $('stop').disabled=false;$('retryImu').disabled=false;
     status('準備できました。縦持ちで顔を正面に向け、基準姿勢を記録してください。');
     track.addEventListener('ended',()=>{if(state.running){stop();status('カメラが切断されました。再度開始してください。',true);}});
@@ -115,6 +116,7 @@ $('start').addEventListener('click',async()=>{
 $('retryImu').addEventListener('click',()=>{permissionsFromClick();});
 $('stop').addEventListener('click',stop);
 function stop(){
+  dismissNextRecord();
   if(state.recording)endRecord('camera_stopped');
   state.running=false;state.generation++;state.pending=null;state.collect=null;state.latest=null;
   clearTimeout(state.timer);state.worker?.terminate();state.worker=null;state.detector?.close();state.detector=null;
@@ -197,10 +199,10 @@ function consume(result,p){
   $('iris').textContent=`${fmt(iris?.left,2)} / ${fmt(iris?.right,2)}`;
   $('imuAge').textContent=age===null?'—':`${fmt(age,0)} ms`;$('latency').textContent=`${fmt(result.inferenceMs,0)} ms`;
   $('imuStatus').textContent=fresh?'IMU：方向を受信中':'IMU：方向未受信／遅延';
-  $('baseline').disabled=!irisValid||!!state.collect||state.recording;
-  $('calibrate').disabled=!irisValid||!!state.collect||state.recording;
-  $('clearCalibration').disabled=!state.calibration||state.recording||!!state.collect;
-  $('record').disabled=!state.baseline||state.recording||!!state.collect;
+  $('baseline').disabled=!irisValid||!!state.collect||state.recording||state.recordStarting;
+  $('calibrate').disabled=!irisValid||!!state.collect||state.recording||state.recordStarting;
+  $('clearCalibration').disabled=!state.calibration||state.recording||state.recordStarting||!!state.collect;
+  $('record').disabled=!state.baseline||state.recording||state.recordStarting||state.awaitingNext||!!state.collect;
   collectFrame(row);
 }
 function draw(lm){
@@ -247,6 +249,7 @@ function collectFrame(row){
   }
 }
 function invalidate(message){
+  dismissNextRecord();
   if(state.recording)endRecord('baseline_invalidated');
   state.baseline=null;state.collect=null;
   $('record').disabled=true;
@@ -264,42 +267,104 @@ for(const id of ['hfov','irisMm'])$(id).addEventListener('change',()=>{
 
 // Append-only checkpoints: keep capture callbacks free of large JSON writes.
 let dbPromise;
-function db(){return dbPromise??=new Promise((resolve,reject)=>{const r=indexedDB.open('posture-lab-checkpoint',1);r.onupgradeneeded=()=>r.result.createObjectStore('chunks',{keyPath:'id'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
-async function checkpoint(reset=false){
-  if(!state.session||state.saveBusy)return;
+function db(){
+  return dbPromise??=new Promise((resolve,reject)=>{
+    let expired=false;
+    const timeout=setTimeout(()=>{expired=true;reject(Error('端末内保存の応答がありません。別タブで同じページを開いている場合は閉じてください。'));},8000);
+    const r=indexedDB.open('posture-lab-checkpoint',2);
+    r.onupgradeneeded=()=>{
+      if(!r.result.objectStoreNames.contains('chunks'))r.result.createObjectStore('chunks',{keyPath:'id'});
+      if(!r.result.objectStoreNames.contains('archives'))r.result.createObjectStore('archives',{keyPath:'id'});
+    };
+    r.onsuccess=()=>{clearTimeout(timeout);if(expired){r.result.close();return;}r.result.onversionchange=()=>{r.result.close();dbPromise=null;};resolve(r.result);};
+    r.onerror=()=>{clearTimeout(timeout);reject(r.error);};
+  }).catch(e=>{dbPromise=null;throw e;});
+}
+function finishTransaction(tx){
+  return new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>{try{tx.abort();}catch{}reject(Error('端末内保存がタイムアウトしました。'));},8000);
+    tx.oncomplete=()=>{clearTimeout(timeout);resolve();};
+    tx.onerror=tx.onabort=()=>{clearTimeout(timeout);reject(tx.error||Error('端末内保存が中断されました。'));};
+  });
+}
+function checkpoint(reset=false){
+  if(!state.session)return Promise.resolve();
+  if(state.saveBusy)return state.saveTask;
+  state.saveTask=writeCheckpoint(reset);return state.saveTask;
+}
+async function writeCheckpoint(reset){
   state.saveBusy=true;
+  const s=state.session;
   try{
-    const d=await db(),s=state.session;
+    const d=await db();
     const counts=Object.fromEntries(['frames','motion','orientation','events'].map(k=>[k,s[k].length]));
     const chunk={id:state.chunk};for(const k of Object.keys(counts))chunk[k]=s[k].slice(reset?0:state.saved[k],counts[k]);
-    await new Promise((resolve,reject)=>{
-      const tx=d.transaction('chunks','readwrite'),store=tx.objectStore('chunks');
-      if(reset)store.clear();
-      store.put({id:0,meta:s.meta});store.put(chunk);
-      tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
-    });
+    const tx=d.transaction('chunks','readwrite'),store=tx.objectStore('chunks');
+    const done=finishTransaction(tx);
+    if(reset)store.clear();
+    store.put({id:0,meta:s.meta});store.put(chunk);
+    await done;
     state.saved=counts;state.chunk++;state.storageOK=true;state.lastCheckpoint=performance.now();
   }catch{state.storageOK=false;}
   finally{state.saveBusy=false;}
 }
 function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance'])$(id).disabled=locked;}
-$('record').addEventListener('click',async()=>{
-  if(state.recording||!state.baseline||state.saveBusy)return;
-  if(state.dirty&&!confirm('現在の記録をまだ保存していません。新しい記録で置き換えますか？'))return;
+$('record').addEventListener('click',()=>{
+  if(state.recording||state.recordStarting||!state.running||!state.baseline)return;
+  if(state.dirty){
+    state.awaitingNext=true;$('nextRecordPanel').hidden=false;$('record').disabled=true;
+    $('nextRecordNote').textContent=state.session?.meta.exports?.csvRequestedAt?'CSVの保存操作は済んでいます。全記録JSONの保存操作はまだ行われていません。':'前回の記録の保存操作はまだ行われていません。';
+    return;
+  }
+  startRecording();
+});
+function dismissNextRecord(){state.awaitingNext=false;$('nextRecordPanel').hidden=true;}
+$('cancelNextRecord').addEventListener('click',dismissNextRecord);
+$('continueRecord').addEventListener('click',()=>{dismissNextRecord();startRecording();});
+async function startRecording(){
+  if(state.recording||state.recordStarting||!state.running||!state.baseline||state.collect)return;
+  state.recordStarting=true;$('record').disabled=true;$('continueRecord').disabled=true;
+  $('sessionSelect').disabled=true;$('exportCsv').disabled=true;$('exportJson').disabled=true;
+  const generation=state.generation,baseline=state.baseline;
+  try{
+    // Called directly by a user gesture. Resume the preview after a download UI.
+    await new Promise((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(Error('カメラ映像が再開しません。記録を保存してからカメラを再起動してください。')),8000);
+      video.play().then(()=>{clearTimeout(timeout);resolve();},e=>{clearTimeout(timeout);reject(e);});
+    });
+    if(state.saveTask)await state.saveTask;
+    if(state.session){
+      status('前の記録を端末内に退避しています。カメラ計測は継続します。');
+      await archiveSession(state.session);
+    }else if(recovery?.length){
+      await archiveSession(recoveredSession());
+    }
+    if(!state.running||document.hidden||generation!==state.generation||state.baseline!==baseline)return;
+    beginSession();
+    // A checkpoint failure must not suspend live capture or leave the UI locked.
+    checkpoint(true);updateRecording();status('新しい記録を開始しました。');
+  }catch(e){status(`次の記録を開始できませんでした：${e.message} 前の記録は保持しています。CSV／JSONを保存できます。`,true);}
+  finally{
+    state.recordStarting=false;$('continueRecord').disabled=false;refreshSessionSelect();
+    $('exportCsv').disabled=state.recording||!selectedSession();$('exportJson').disabled=state.recording||!selectedSession();
+  }
+}
+function beginSession(){
   const id=`posture-${new Date().toISOString().replace(/[:.]/g,'-')}`;
-  state.session={meta:{id,version:'0.1',createdAt:new Date().toISOString(),timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
+  state.session={meta:{id,version:APP_VERSION,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[]};
   state.saved={frames:0,motion:0,orientation:0,events:0};state.chunk=1;
   state.recording=true;state.dirty=true;event('record_start');lockSettings(true);
   $('record').disabled=true;$('endRecord').disabled=false;
   $('exportCsv').disabled=true;$('exportJson').disabled=true;
-  await checkpoint(true);updateRecording();
-});
+  refreshSessionSelect();$('sessionSelect').value='current';$('sessionSelect').disabled=true;updateSaveStatus();
+}
 function endRecord(reason='user'){
   if(!state.recording)return;
   event('record_stop',{reason});state.recording=false;state.session.meta.end=performance.now();state.session.meta.stopReason=reason;
   lockSettings(false);$('endRecord').disabled=true;$('exportCsv').disabled=false;$('exportJson').disabled=false;
+  refreshSessionSelect();updateSaveStatus();
   checkpoint();updateRecording();
 }
 $('endRecord').addEventListener('click',()=>endRecord());
@@ -323,20 +388,62 @@ function download(name,content,type){
   status('保存操作を開始しました。iPhoneではダウンロード一覧／「ファイル」で保存先を確認してください。');
 }
 const csvCell=v=>`"${String(v??'').replaceAll('"','""')}"`;
+function selectedSession(){return $('sessionSelect').value==='current'?state.session:state.archives.get($('sessionSelect').value);}
+function refreshSessionSelect(){
+  const previous=$('sessionSelect').value;
+  $('sessionSelect').replaceChildren(new Option('現在の記録','current'));
+  for(const [id,s] of [...state.archives].reverse()){
+    if(id===state.session?.meta.id)continue;
+    const when=new Date(s.meta.createdAt).toLocaleString('ja-JP');
+    $('sessionSelect').add(new Option(`${when} / ${s.frames.length}件（退避済み）`,id));
+  }
+  if([...$('sessionSelect').options].some(o=>o.value===previous))$('sessionSelect').value=previous;
+  $('sessionSelect').disabled=state.recording||state.recordStarting||(!state.session&&!state.archives.size);
+}
+function updateSaveStatus(){
+  const s=selectedSession();
+  if(!s){$('saveStatus').textContent='記録を停止した後にCSVと全記録JSONを保存できます。';return;}
+  const out=s.meta.exports||{};
+  $('saveStatus').textContent=`CSV：${out.csvRequestedAt?'保存操作済み':'未出力'} ／ 全記録JSON：${out.jsonRequestedAt?'保存操作済み':'未出力'}。保存完了は端末の「ファイル」等で確認してください。`;
+}
+async function archiveSession(s){
+  const d=await db(),tx=d.transaction('archives','readwrite');
+  const done=finishTransaction(tx);
+  tx.objectStore('archives').put({id:s.meta.id,session:s});
+  await done;state.archives.set(s.meta.id,s);refreshSessionSelect();
+}
+function exportRequested(s,format){
+  s.meta.exports??={};s.meta.exports[`${format}RequestedAt`]=new Date().toISOString();
+  if(s===state.session){if(format==='json'){state.dirty=false;dismissNextRecord();}checkpoint();}
+  if(state.archives.has(s.meta.id))archiveSession(s).catch(()=>{});
+  updateSaveStatus();
+}
+$('sessionSelect').addEventListener('change',()=>{
+  const available=!!selectedSession()&&!state.recording;
+  $('exportCsv').disabled=!available;$('exportJson').disabled=!available;updateSaveStatus();
+});
 $('exportCsv').addEventListener('click',()=>{
-  const s=state.session;if(!s)return;
+  const s=selectedSession();if(!s||state.recording)return;
   const keys=Object.keys(s.frames[0]||{}).filter(k=>k!=='matrix');
   const header=['sessionId','baselineIrisPx','baselineHeadInclination','calibrationDistanceCm',...keys];
   const rows=s.frames.map(r=>[s.meta.id,s.meta.baseline.irisPx,s.meta.baseline.head,s.meta.distanceCalibration?.knownDistanceCm,...keys.map(k=>r[k])]);
   download(`${s.meta.id}.csv`,'\ufeff'+[header,...rows].map(r=>r.map(csvCell).join(',')).join('\r\n'),'text/csv;charset=utf-8');
+  exportRequested(s,'csv');
 });
-$('exportJson').addEventListener('click',()=>{if(state.session){download(`${state.session.meta.id}.json`,JSON.stringify(state.session),'application/json');state.dirty=false;}});
+$('exportJson').addEventListener('click',()=>{const s=selectedSession();if(s&&!state.recording){download(`${s.meta.id}.json`,JSON.stringify(s),'application/json');exportRequested(s,'json');}});
 async function readRecovery(){const d=await db();return new Promise((resolve,reject)=>{const r=d.transaction('chunks').objectStore('chunks').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
 let recovery=null;
 readRecovery().then(chunks=>{if(chunks.length&&chunks[0].meta){recovery=chunks;$('recover').hidden=false;}}).catch(()=>{});
-$('recover').addEventListener('click',()=>{
-  if(!recovery)return;const result={meta:{...recovery[0].meta,recovered:true},frames:[],motion:[],orientation:[],events:[]};
+db().then(d=>new Promise((resolve,reject)=>{
+  const r=d.transaction('archives').objectStore('archives').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
+})).then(items=>{for(const item of items)if(!state.archives.has(item.id))state.archives.set(item.id,item.session);refreshSessionSelect();}).catch(()=>{});
+function recoveredSession(){
+  const result={meta:{...recovery[0].meta,recovered:true},frames:[],motion:[],orientation:[],events:[]};
   for(const c of recovery.slice(1))for(const k of ['frames','motion','orientation','events'])result[k].push(...(c[k]||[]));
+  return result;
+}
+$('recover').addEventListener('click',()=>{
+  if(!recovery)return;const result=recoveredSession();
   download(`${result.meta.id}-recovered.json`,JSON.stringify(result),'application/json');
 });
 window.addEventListener('beforeunload',e=>{if(state.dirty){e.preventDefault();e.returnValue='';}});
