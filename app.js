@@ -1,4 +1,4 @@
-import {rad,deg,median,sd,mean,faceRotation,headInclination,measureIris,upFromOrientation} from './geometry.js';
+import {rad,deg,clamp,median,sd,mean,faceRotation,headInclination,headInclinationFromUp,measureIris,upFromOrientation,upFromGravity,IRIS_POINTS} from './geometry.js';
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
@@ -14,6 +14,12 @@ const state={running:false,starting:false,stream:null,worker:null,detector:null,
   orientation:null,motion:null,baseline:null,calibration:null,collect:null,latest:null,pending:null,
   nextId:0,lastFrame:0,lastVideoTime:-1,frames:[],session:null,recording:false,dirty:false,wake:null,
   imageSize:null,timer:null,storageOK:true,saveBusy:false,saveTask:null,recordStarting:false,awaitingNext:false,archives:new Map(),lastCheckpoint:0,saved:{frames:0,motion:0,orientation:0,events:0},chunk:1};
+
+// ---- 終了時の品質判定（本実験の「事前に決める除外基準」の代わり。区間を知らないので5秒窓で見る）
+const QUALITY={windowSec:5,windowStepSec:.5,minWindowRate:.7,maxHGapSec:2,imuGapMs:250,standMoveDeg:1,standReturnDeg:.5};
+// IMU：方向（deviceorientation）が古いときは、加速度（devicemotion）の重力成分から上向きを求める予備の経路を使う
+const IMU={maxAgeMs:250,gravityLowPass:.2};   // 重力成分は指数平滑（60 Hzで約80 ms）して手の動きを抑える
+const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 
 // ---- セットアップとカメラ校正（0.2.0）
 const SETUP={irisMm:11.7,tiltTolDeg:1,heightTolCm:1,distanceTolCm:1,stableMs:1000}; // 高さ・距離の案内は虹彩の実寸を11.7 mmと仮定
@@ -67,6 +73,12 @@ window.addEventListener('devicemotion',e=>{
   if(!state.running&&!state.starting)return;
   const vector=v=>({x:n(v?.x),y:n(v?.y),z:n(v?.z)});
   const m={t:performance.now(),eventTimestamp:e.timeStamp,interval:n(e.interval),acceleration:vector(e.acceleration),includingGravity:vector(e.accelerationIncludingGravity),rotationRate:{alpha:n(e.rotationRate?.alpha),beta:n(e.rotationRate?.beta),gamma:n(e.rotationRate?.gamma)}};
+  const g=m.includingGravity;
+  if([g.x,g.y,g.z].every(Number.isFinite)&&(g.x||g.y||g.z)){
+    const a=IMU.gravityLowPass,lp=state.gravLP;
+    state.gravLP=lp?{x:lp.x+a*(g.x-lp.x),y:lp.y+a*(g.y-lp.y),z:lp.z+a*(g.z-lp.z)}:{...g};
+    m.gravityLP={...state.gravLP};
+  }
   state.motion=m;
   if(state.recording)state.session.motion.push(m);
 });
@@ -195,7 +207,27 @@ function consume(result,p){
   const ratio=irisValid&&state.baseline?state.baseline.irisPx/iris.p*100:null;
   const delta=head!==null&&state.baseline?.head!==null&&state.baseline?.head!==undefined?head-state.baseline.head:null;
   // f を使った値（0.2.0）：Z = f × 11.7 mm ÷ 虹彩径、目の中点の主点（画像の中心）からのずれ（cm）＝ 画素 × Z / f
-  const fc=focal(),tilt=deviceTilt(fresh?upFromOrientation(p.o):null);
+  // IMU の2つの経路（0.2.0）：方向から求めた上向き upO、加速度の重力成分から求めた上向き upM
+  const mAge=p.m?p.t-p.m.t:null,mFresh=mAge!==null&&mAge>=0&&mAge<=IMU.maxAgeMs&&!!p.m.gravityLP;
+  const upO=fresh?upFromOrientation(p.o):null;
+  if(upO&&mFresh){const g=p.m.gravityLP,nm=Math.hypot(g.x,g.y,g.z);state.gravSign=dot3([g.x/nm,g.y/nm,g.z/nm],upO)>=0?1:-1;state.gravSignSource='orientation';}
+  else if(mFresh&&state.gravSign===undefined){state.gravSign=p.m.gravityLP.y<0?-1:1;state.gravSignSource='portrait-assumption';}   // 縦向き・上が上の前提
+  const upM=mFresh?upFromGravity(p.m.gravityLP,state.gravSign??1):null;
+  const up=upO??upM,imuSource=upO?'orientation':upM?'motion':null;
+  // h は有効範囲外の顔の向きでも計算して残す（既存の headInclination は変えない）
+  const hO=pose&&portraitFrame&&upO?headInclinationFromUp(pose,upO):null,hM=pose&&portraitFrame&&upM?headInclinationFromUp(pose,upM):null,hRaw=hO??hM;
+  // 固定（スタンド）では端末が動かないので、基準時の上向きで h を補う（IMU が途切れても出る）
+  const stand=(state.recording?state.session.meta.holdMode:$('holdMode').value)==='stand',bUp=state.baseline?.up??null;
+  const hFixed=stand&&bUp&&pose&&portraitFrame?headInclinationFromUp(pose,bUp):null;
+  const standChange=stand&&bUp&&up?deg(Math.acos(clamp(dot3(up,bUp),-1,1))):null;
+  const reasons=[];
+  if(!pose)reasons.push('no_face');
+  else{if(Math.abs(pose.yaw)>25)reasons.push('yaw');if(Math.abs(pose.pitch)>40)reasons.push('pitch');if(Math.abs(pose.roll)>25)reasons.push('roll');}
+  if(!portraitFrame)reasons.push('landscape');
+  if(pose)reasons.push(...(iris?iris.reasons:['no_iris']));
+  if(!fresh)reasons.push(p.o?'orientation_stale':'orientation_missing');
+  if(!mFresh)reasons.push(p.m?'motion_stale':'motion_missing');
+  const fc=focal(),tilt=deviceTilt(up);
   const zf=iris&&iris.p>0?fc.f*SETUP.irisMm/iris.p/10:null;
   const ex=iris?iris.center[0]*canvas.width-canvas.width/2:null,ey=iris?iris.center[1]*canvas.height-canvas.height/2:null;
   const row={t:p.t,processedAt:now,videoTime:p.videoTime,inferenceMs:result.inferenceMs,deliveryMs:now-p.t,
@@ -212,7 +244,20 @@ function consume(result,p){
     focalPx:fc.f,focalSource:fc.source,zFocalCm:zf,eyeOffsetXPx:ex,eyeOffsetYPx:ey,
     eyeOffsetXCm:zf!==null?ex*zf/fc.f:null,eyeOffsetYCm:zf!==null?ey*zf/fc.f:null,
     deviceTiltLRDeg:tilt?.lr??null,deviceTiltFBDeg:tilt?.fb??null,
+    headInclinationRaw:hRaw,headInclinationOrientation:hO,headInclinationMotion:hM,headInclinationFixedUp:hFixed,
+    imuSource,motionAgeMs:mAge,gravitySign:state.gravSign??null,gravitySignSource:state.gravSignSource??null,
+    gravityLPx:p.m?.gravityLP?.x??null,gravityLPy:p.m?.gravityLP?.y??null,gravityLPz:p.m?.gravityLP?.z??null,
+    upX:up?.[0]??null,upY:up?.[1]??null,upZ:up?.[2]??null,standTiltChangeDeg:standChange,invalidReasons:reasons.join('|'),
+    irisRightHPx:iris?.rightHV.h??null,irisRightVPx:iris?.rightHV.v??null,irisLeftHPx:iris?.leftHV.h??null,irisLeftVPx:iris?.leftHV.v??null,
+    eyeOpenRight:iris?.openRight??null,eyeOpenLeft:iris?.openLeft??null,eyeOpenMin:iris?.open??null,
+    eyelidGapRightPx:iris?.eyelidGapPx.right??null,eyelidGapLeftPx:iris?.eyelidGapPx.left??null,
+    ...Object.fromEntries(IRIS_POINTS.flatMap(i=>[[`iris${i}X`,iris?.points[i][0]??null],[`iris${i}Y`,iris?.points[i][1]??null]])),
     matrix:pose?.matrix??null,matrixColumnMajor:pose?.columnMajor??null};
+  if(state.recording&&standChange!==null){   // 固定の記録中に端末の傾きが基準から1°以上変わったらイベントにする
+    const st=state.standWatch;st.max=Math.max(st.max,standChange);
+    if(!st.moved&&standChange>QUALITY.standMoveDeg){st.moved=true;st.count++;event('stand_moved',{angleDeg:standChange,source:imuSource});}
+    else if(st.moved&&standChange<QUALITY.standReturnDeg){st.moved=false;event('stand_returned',{angleDeg:standChange,source:imuSource});}
+  }
   state.latest=row;
   draw(result.landmarks);updateSetup(row,iris);
   if(state.recording){state.session.frames.push(row);state.dirty=true;}
@@ -388,8 +433,8 @@ function collectFrame(row){
   if(c.type==='baseline'){
     const head=heads.length>=Math.max(15,rows.length*.8)?median(heads):null;
     const md=k=>{const v=rows.map(r=>r[k]).filter(x=>x!==null&&x!==undefined);return v.length?median(v):null;};
-    const sl=state.setupLive;
-    state.baseline={t:performance.now(),irisPx,head,frames:rows.length,validImuFrames:heads.length,...config(),
+    const sl=state.setupLive,uv=['upX','upY','upZ'].map(md),un=uv.every(x=>x!==null)?Math.hypot(...uv):0;
+    state.baseline={t:performance.now(),irisPx,head,frames:rows.length,validImuFrames:heads.length,...config(),up:un>0?uv.map(x=>x/un):null,
       setup:{mode:$('holdMode').value,targetCm:Number($('targetDistance').value)||40,passedAtStart:!!sl?.passed,tiltLRDeg:md('deviceTiltLRDeg'),tiltFBDeg:md('deviceTiltFBDeg'),
         heightOffsetCm:irisPx>0&&md('eyeOffsetYPx')!==null?md('eyeOffsetYPx')*SETUP.irisMm/irisPx/10:null,distanceCm:md('zFocalCm'),focalPx:md('focalPx'),focalSource:rows.at(-1).focalSource,irisMmAssumed:SETUP.irisMm,tolerances:{...SETUP}}};
     $('baselineStatus').textContent=head===null?'基準取得済み。ただしIMU不足のため距離比のみ。IMU許可後に取り直してください。':`基準取得済み（${rows.length}フレーム）。表示を基準からの変化に切り替えました。`;
@@ -512,15 +557,54 @@ function beginSession(){
     holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[]};
-  state.saved={frames:0,motion:0,orientation:0,events:0};state.chunk=1;
+  state.saved={frames:0,motion:0,orientation:0,events:0};state.chunk=1;state.standWatch={moved:false,count:0,max:0};$('qualityBox').hidden=true;
   state.recording=true;state.dirty=true;event('record_start');lockSettings(true);wake();   // 記録中は画面を消さない
   $('record').disabled=true;$('endRecord').disabled=false;
   $('exportCsv').disabled=true;$('exportJson').disabled=true;
   refreshSessionSelect();$('sessionSelect').value='current';$('sessionSelect').disabled=true;updateSaveStatus();
 }
+// ---- 終了時の品質判定。h が出たフレーム＝headInclinationRaw（有効範囲外でも数える）。固定では基準時の上向きで補った値も数える
+function judgeQuality(s){
+  const fr=s.frames,t0=s.meta.start,t1=s.meta.end??performance.now(),dur=(t1-t0)/1000,stand=s.meta.holdMode==='stand';
+  const hasH=r=>r.headInclinationRaw!==null||(stand&&r.headInclinationFixedUp!==null);
+  const rate=(a,f)=>a.length?a.filter(f).length/a.length:null;
+  const gaps=list=>{let c=0,m=0;for(let i=1;i<list.length;i++){const g=list[i].t-list[i-1].t;if(g>QUALITY.imuGapMs)c++;m=Math.max(m,g);}return {count:c,maxMs:Math.round(m)};};
+  // 5秒窓を0.5秒ずつずらし、窓ごとに h が出たフレームの割合を求める
+  let worst=null;
+  for(let a=0;a+QUALITY.windowSec<=dur+1e-9;a+=QUALITY.windowStepSec){
+    const w=fr.filter(r=>r.t>=t0+a*1000&&r.t<t0+(a+QUALITY.windowSec)*1000);
+    const r=w.length?w.filter(hasH).length/w.length:0;
+    if(!worst||r<worst.rate)worst={rate:r,startSec:+a.toFixed(1),frames:w.length};
+  }
+  // h が出ない時間の最長（記録の始まりと終わりも含める）
+  const ts=[t0,...fr.filter(hasH).map(r=>r.t),t1];let gap={sec:0,startSec:0};
+  for(let i=1;i<ts.length;i++){const g=(ts[i]-ts[i-1])/1000;if(g>gap.sec)gap={sec:g,startSec:(ts[i-1]-t0)/1000};}
+  const imuGaps={orientation:gaps(s.orientation),motion:gaps(s.motion)};
+  const sw=state.standWatch||{count:0,max:0},standEvents=s.events.filter(e=>e.type==='stand_moved').length;
+  const reasons=[];
+  if(worst&&worst.rate<QUALITY.minWindowRate)reasons.push(`h が出たフレームが、${worst.startSec.toFixed(1)}〜${(worst.startSec+QUALITY.windowSec).toFixed(1)}秒の窓で ${Math.round(worst.rate*100)}%（${Math.round(QUALITY.minWindowRate*100)}%以上が必要）`);
+  if(gap.sec>=QUALITY.maxHGapSec)reasons.push(`h が ${gap.sec.toFixed(1)}秒 途切れました（${gap.startSec.toFixed(1)}秒から。${QUALITY.maxHGapSec}秒未満が必要）`);
+  if(stand&&standEvents)reasons.push(`スタンドの傾きが基準から ${QUALITY.standMoveDeg}°以上変わりました（${standEvents}回、最大 ${sw.max.toFixed(1)}°）`);
+  if(!worst)reasons.push(`記録が短すぎます（${QUALITY.windowSec}秒未満）`);
+  return {ok:!reasons.length,verdict:reasons.length?'やり直し推奨':'OK',reasons,rules:{...QUALITY,hCounted:stand?'headInclinationRaw or headInclinationFixedUp':'headInclinationRaw'},
+    durationSec:dur,frames:fr.length,fps:fr.length/Math.max(dur,1e-9),
+    faceValidRate:rate(fr,r=>r.faceValid),irisValidRate:rate(fr,r=>r.irisValid),imuValidRate:rate(fr,r=>r.imuValid),imuAnyRate:rate(fr,r=>r.imuSource!==null),
+    hRate:rate(fr,hasH),hRawRate:rate(fr,r=>r.headInclinationRaw!==null),headInclinationRate:rate(fr,r=>r.headInclination!==null),
+    worstWindow:worst,longestHGap:{sec:gap.sec,startSec:gap.startSec},imuGaps,
+    standMoved:stand?{events:standEvents,maxDeg:sw.max}:null};
+}
+function showQuality(q){
+  const pc=x=>x===null?'—':`${Math.round(x*100)}%`,box=$('qualityBox');box.hidden=false;box.className=`quality ${q.ok?'ok':'ng'}`;
+  box.innerHTML=`<strong>${q.verdict}</strong>${q.ok?'':`<ul>${q.reasons.map(r=>`<li>${r}</li>`).join('')}</ul><span>この回だけやり直してください。</span>`}
+    <dl><dt>h が出た率（全体）</dt><dd>${pc(q.hRate)}</dd><dt>最も悪い5秒窓</dt><dd>${q.worstWindow?`${pc(q.worstWindow.rate)}（${q.worstWindow.startSec.toFixed(1)}秒〜）`:'—'}</dd>
+    <dt>h の最長の途切れ</dt><dd>${q.longestHGap.sec.toFixed(1)}秒（${q.longestHGap.startSec.toFixed(1)}秒〜）</dd><dt>顔が有効</dt><dd>${pc(q.faceValidRate)}</dd><dt>IMU（方向）が有効</dt><dd>${pc(q.imuValidRate)}</dd>
+    <dt>fps</dt><dd>${q.fps.toFixed(1)}</dd><dt>IMUの途切れ（250 ms超）</dt><dd>方向 ${q.imuGaps.orientation.count}回・最長 ${(q.imuGaps.orientation.maxMs/1000).toFixed(1)}秒 ／ 加速度 ${q.imuGaps.motion.count}回・最長 ${(q.imuGaps.motion.maxMs/1000).toFixed(1)}秒</dd>
+    ${q.standMoved?`<dt>スタンドの動き</dt><dd>${q.standMoved.events}回（最大 ${q.standMoved.maxDeg.toFixed(1)}°）</dd>`:''}</dl>`;
+}
 function endRecord(reason='user'){
   if(!state.recording)return;
   event('record_stop',{reason});state.recording=false;state.session.meta.end=performance.now();state.session.meta.stopReason=reason;
+  state.session.meta.quality=judgeQuality(state.session);showQuality(state.session.meta.quality);
   lockSettings(false);$('endRecord').disabled=true;$('exportCsv').disabled=false;$('exportJson').disabled=false;
   refreshSessionSelect();updateSaveStatus();
   checkpoint();updateRecording();

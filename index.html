@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#102c36">
   <title>姿勢ラボ — 実験用プロトタイプ</title>
-  <link rel="stylesheet" href="styles.css?v=0.2.0-2">
+  <link rel="stylesheet" href="styles.css?v=0.2.0">
 </head>
 <body>
 <main>
-  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.2.0（作業中）</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
+  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.2.0</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
   <p class="intro">前面カメラと端末の動きから、基準姿勢からの変化を記録します。縦持ち・着座で使用してください。</p>
   <section class="card setup">
     <h2>1 <span>カメラとセンサーを開始</span></h2>
@@ -81,6 +81,7 @@
       <div class="actions"><button id="continueRecord">前の記録を残して次を開始</button><button id="cancelNextRecord">今の記録に戻る</button></div>
     </div>
     <p id="recordStatus" class="note" aria-live="polite">未記録</p>
+    <div id="qualityBox" class="quality" hidden></div>
     <label>保存する記録<select id="sessionSelect" disabled><option value="current">現在の記録</option></select></label>
     <p id="saveStatus" class="note" aria-live="polite">保存操作の状態はここに表示されます。端末への保存完了は「ファイル」等で確認してください。</p>
   </section>
@@ -92,6 +93,6 @@
   </details>
   <footer>姿勢ラボ / 教授説明・実機確認用の試作。角度・距離・軸の対応は未検証です。<br>MediaPipeを使用。<a href="https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE" target="_blank" rel="noopener">ライセンス</a></footer>
 </main>
-<script type="module" src="app.js?v=0.2.0-2"></script>
+<script type="module" src="app.js?v=0.2.0"></script>
 </body>
 </html>

@@ -28,7 +28,10 @@ export function upFromOrientation(o) {
 }
 
 export function headInclination(pose,o) {
-  const up=upFromOrientation(o);
+  return headInclinationFromUp(pose,upFromOrientation(o));
+}
+// 端末座標で表した鉛直上向き up から h を求める（headInclination と同じ定義：下向きが正、重力基準）
+export function headInclinationFromUp(pose,up) {
   if(!pose||!up)return null;
   // Unmirrored front-camera geometry -> device axes: rotate 180° about y.
   // CSS mirror affects display only. Actual device axis correspondence needs
@@ -37,6 +40,15 @@ export function headInclination(pose,o) {
   return -deg(Math.asin(clamp(forward.reduce((s,x,i)=>s+x*up[i],0),-1,1)));
 }
 
+// devicemotion の accelerationIncludingGravity（静止時は重力の反力＝上向き）から端末座標の上向きを求める。
+// 端末によって符号が逆のことがあるので、sign（+1 / −1）を掛けて使う。手の動きの加速度も含むので、呼び出し側で平滑化する
+export function upFromGravity(g,sign=1) {
+  if(!g||![g.x,g.y,g.z].every(Number.isFinite))return null;
+  const v=unit([g.x*sign,g.y*sign,g.z*sign]);
+  return v;
+}
+export const IRIS_POINTS=[468,469,470,471,472,473,474,475,476,477];
+export const EYELID_POINTS={right:[159,145,33,133],left:[386,374,362,263]};   // [上まぶた, 下まぶた, 目尻, 目頭]
 export function measureIris(lm,w,h) {
   if(!lm||lm.length<478)return null;
   const px=i=>[lm[i].x*w,lm[i].y*h];
@@ -45,7 +57,19 @@ export function measureIris(lm,w,h) {
   const right=diameter(468),left=diameter(473),p=(right+left)/2;
   const center=[(lm[468].x+lm[473].x)/2,(lm[468].y+lm[473].y)/2];
   const eyeOpen=(a,b,c,d)=>dist(px(a),px(b))/Math.max(1,dist(px(c),px(d)));
-  const open=Math.min(eyeOpen(159,145,33,133),eyeOpen(386,374,362,263));
-  const valid=Number.isFinite(p)&&p>=5&&Math.min(left,right)/Math.max(left,right)>.65&&open>.12&&[468,473,469,470,471,472,474,475,476,477].every(i=>lm[i].x>0&&lm[i].x<1&&lm[i].y>0&&lm[i].y<1);
-  return {left,right,p,center,open,valid};
+  const openRight=eyeOpen(...EYELID_POINTS.right),openLeft=eyeOpen(...EYELID_POINTS.left);
+  const open=Math.min(openRight,openLeft);
+  const inFrame=IRIS_POINTS.every(i=>lm[i].x>0&&lm[i].x<1&&lm[i].y>0&&lm[i].y<1);
+  const valid=Number.isFinite(p)&&p>=5&&Math.min(left,right)/Math.max(left,right)>.65&&open>.12&&inFrame;
+  // 記録用（0.2.0）：目ごとの横径・縦径（x方向の成分が大きい方の組を横径とする）、まぶたの開き、無効の理由
+  const hv=c=>{const a=px(c+1),b=px(c+3),d=px(c+2),e=px(c+4),first=Math.abs(a[0]-b[0])>=Math.abs(d[0]-e[0]);
+    return first?{h:dist(a,b),v:dist(d,e)}:{h:dist(d,e),v:dist(a,b)};};
+  const reasons=[];
+  if(!(Number.isFinite(p)&&p>=5))reasons.push('iris_small');
+  if(!(Math.min(left,right)/Math.max(left,right)>.65))reasons.push('iris_lr_mismatch');
+  if(!(open>.12))reasons.push('eye_closed');
+  if(!inFrame)reasons.push('iris_out_of_frame');
+  return {left,right,p,center,open,valid,openRight,openLeft,rightHV:hv(468),leftHV:hv(473),reasons,
+    points:Object.fromEntries(IRIS_POINTS.map(i=>[i,px(i)])),
+    eyelidGapPx:{right:dist(px(159),px(145)),left:dist(px(386),px(374))}};
 }
