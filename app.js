@@ -31,6 +31,12 @@ function focal(){
 // 端末の傾き：端末座標で表した鉛直上向き u から。縦向きで垂直に立てると u = (0, 1, 0)
 //   左右 = atan2(u_x, u_y)（＋：上端が左に傾く、画面を見て）、前後 = atan2(u_z, u_y)（＋：画面が上を向く＝上端が奥へ倒れる）
 function deviceTilt(up){if(!up)return null;return {lr:deg(Math.atan2(up[0],up[1])),fb:deg(Math.atan2(up[2],up[1]))};}
+// ---- 被験者・条件・回（前回の値を覚える）
+const SUBJECT_KEY='posture-lab.subject.v1',HOLD_FOR={fixed:'stand',hand:'hand'};
+function subjectForm(){return {id:$('subjId').value.trim().toUpperCase(),condition:$('condition').value,run:Number($('runNo').value)||null,memo:$('memo').value.trim()};}
+function checkSubject(f){if(!/^P\d{2}$/.test(f.id))return '被験者IDを P01 の形（Pと数字2桁）で入力してください。';if(!(f.run>=1))return '回番号を1以上で入力してください。';return null;}
+function restoreSubject(){try{const f=JSON.parse(localStorage.getItem(SUBJECT_KEY));if(f){$('subjId').value=f.id||'';$('condition').value=f.condition||'fixed';$('runNo').value=f.run||1;$('memo').value=f.memo||'';}}catch{}}
+function applyCondition(){const m=HOLD_FOR[$('condition').value];if(m)$('holdMode').value=m;}
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error);}
 function event(type,detail={}){if(state.recording)state.session.events.push({t:performance.now(),type,...detail});}
 function config(){return {hfov:Number($('hfov').value),irisMm:Number($('irisMm').value),...modelConfig()};}
@@ -100,7 +106,7 @@ async function createDetector(){
     await mainDetector();
   }
 }
-async function wake(){try{state.wake=await navigator.wakeLock?.request('screen');}catch{/* Optional feature. */}}
+async function wake(){try{if(!state.wake||state.wake.released)state.wake=await navigator.wakeLock?.request('screen');}catch{/* Optional feature. */}}
 
 $('start').addEventListener('click',async()=>{
   if(state.running||state.starting)return;
@@ -352,6 +358,7 @@ $('calibCancel').addEventListener('click',()=>{endCalibration();status('カメ�
 $('calibClear').addEventListener('click',()=>{camCalCache=undefined;try{localStorage.removeItem(CAMERA_CALIB_KEY);}catch{}refreshCalibStatus();status('カメラ校正を消去しました。仮の画角に戻ります。');});
 $('calibExport').addEventListener('click',()=>{const c=loadCameraCalibration();if(c)download(`camera-calibration-${c.createdAt.replace(/[:.]/g,'-')}.json`,JSON.stringify(c,null,1),'application/json');});
 refreshCalibStatus();
+$('condition').addEventListener('change',applyCondition);restoreSubject();applyCondition();
 
 function clearValues(){for(const id of ['headDelta','cva','distance','ratio','pitch','yawRoll','deviceAngles','acceleration','rotationRate','iris','imuAge','latency'])$(id).textContent='—';ctx.clearRect(0,0,canvas.width,canvas.height);}
 
@@ -453,9 +460,10 @@ async function writeCheckpoint(reset){
   }catch{state.storageOK=false;}
   finally{state.saveBusy=false;}
 }
-function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance','holdMode','targetDistance','squareMm'])$(id).disabled=locked;$('calibStart').disabled=locked||!state.running;}
+function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance','holdMode','targetDistance','squareMm','subjId','condition','runNo','memo'])$(id).disabled=locked;$('calibStart').disabled=locked||!state.running;}
 $('record').addEventListener('click',()=>{
   if(state.recording||state.recordStarting||!state.running||!state.baseline)return;
+  const subj=subjectForm(),bad=checkSubject(subj);if(bad){status(bad,true);return;}
   if(state.dirty){
     state.awaitingNext=true;$('nextRecordPanel').hidden=false;$('record').disabled=true;
     $('nextRecordNote').textContent=state.session?.meta.exports?.csvRequestedAt?'CSVの保存操作は済んでいます。全記録JSONの保存操作はまだ行われていません。':'前回の記録の保存操作はまだ行われていません。';
@@ -495,13 +503,17 @@ async function startRecording(){
   }
 }
 function beginSession(){
-  const id=`posture-${new Date().toISOString().replace(/[:.]/g,'-')}`;
-  state.session={meta:{id,version:APP_VERSION,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
+  const subject=subjectForm(),stamp=new Date().toISOString().replace(/[:.]/g,'-');
+  try{localStorage.setItem(SUBJECT_KEY,JSON.stringify(subject));}catch{}
+  // ファイル名：P01_fixed1_posture_<時刻>
+  const id=checkSubject(subject)?`posture-${stamp}`:`${subject.id}_${subject.condition}${subject.run}_posture_${stamp}`;
+  const clock={dateNowMs:Date.now(),perfNowMs:performance.now(),timeOrigin:performance.timeOrigin,note:'記録開始時の Date.now() と performance.now() の組。2台の時計のずれを後で見積もるため'};
+  state.session={meta:{id,version:APP_VERSION,subject,clock,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
     holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[]};
   state.saved={frames:0,motion:0,orientation:0,events:0};state.chunk=1;
-  state.recording=true;state.dirty=true;event('record_start');lockSettings(true);
+  state.recording=true;state.dirty=true;event('record_start');lockSettings(true);wake();   // 記録中は画面を消さない
   $('record').disabled=true;$('endRecord').disabled=false;
   $('exportCsv').disabled=true;$('exportJson').disabled=true;
   refreshSessionSelect();$('sessionSelect').value='current';$('sessionSelect').disabled=true;updateSaveStatus();
