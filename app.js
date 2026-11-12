@@ -1,8 +1,8 @@
-import {rad,median,sd,mean,faceRotation,headInclination,measureIris} from './geometry.js';
+import {rad,deg,median,sd,mean,faceRotation,headInclination,measureIris,upFromOrientation} from './geometry.js';
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
-const APP_VERSION='0.1.1';
+const APP_VERSION='0.2.0';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
@@ -15,6 +15,22 @@ const state={running:false,starting:false,stream:null,worker:null,detector:null,
   nextId:0,lastFrame:0,lastVideoTime:-1,frames:[],session:null,recording:false,dirty:false,wake:null,
   imageSize:null,timer:null,storageOK:true,saveBusy:false,saveTask:null,recordStarting:false,awaitingNext:false,archives:new Map(),lastCheckpoint:0,saved:{frames:0,motion:0,orientation:0,events:0},chunk:1};
 
+// ---- セットアップとカメラ校正（0.2.0）
+const SETUP={irisMm:11.7,tiltTolDeg:1,heightTolCm:1,distanceTolCm:1,stableMs:1000}; // 高さ・距離の案内は虹彩の実寸を11.7 mmと仮定
+const CAMERA_CALIB_KEY='posture-lab.cameraCalibration.v1';
+let audio=null;
+function beep(freq=880,ms=120,gain=.25){try{audio??=new (window.AudioContext||window.webkitAudioContext)();const o=audio.createOscillator(),g=audio.createGain();o.frequency.value=freq;o.connect(g);g.connect(audio.destination);g.gain.setValueAtTime(gain,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+ms/1000);o.start();o.stop(audio.currentTime+ms/1000);}catch{/* 音は任意 */}}
+let camCalCache;   // localStorage を毎フレーム読まないよう覚えておく（保存・消去のときに捨てる）
+function loadCameraCalibration(){if(camCalCache===undefined){try{const c=JSON.parse(localStorage.getItem(CAMERA_CALIB_KEY));camCalCache=c&&c.focalPx>0?c:null;}catch{camCalCache=null;}}return camCalCache;}
+// いま使う焦点距離。校正が同じ解像度ならそれを使い、なければ仮の画角から求める
+function focal(){
+  const w=canvas.width,h=canvas.height,c=loadCameraCalibration();
+  if(c&&c.width===w&&c.height===h)return {f:c.focalPx,source:'charuco',calibration:c};
+  return {f:w/(2*Math.tan(rad(Number($('hfov').value)||60)/2)),source:'assumed-hfov',calibration:c,mismatch:!!c};
+}
+// 端末の傾き：端末座標で表した鉛直上向き u から。縦向きで垂直に立てると u = (0, 1, 0)
+//   左右 = atan2(u_x, u_y)（＋：上端が左に傾く、画面を見て）、前後 = atan2(u_z, u_y)（＋：画面が上を向く＝上端が奥へ倒れる）
+function deviceTilt(up){if(!up)return null;return {lr:deg(Math.atan2(up[0],up[1])),fb:deg(Math.atan2(up[2],up[1]))};}
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error);}
 function event(type,detail={}){if(state.recording)state.session.events.push({t:performance.now(),type,...detail});}
 function config(){return {hfov:Number($('hfov').value),irisMm:Number($('irisMm').value),...modelConfig()};}
@@ -88,6 +104,7 @@ async function wake(){try{state.wake=await navigator.wakeLock?.request('screen')
 
 $('start').addEventListener('click',async()=>{
   if(state.running||state.starting)return;
+  beep(440,1,.001);   // iOSで音を鳴らせるよう、ボタン操作の中で初期化
   if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia){status('HTTPSのURLから開いてください。PCではlocalhostも使えます。',true);return;}
   const permission=permissionsFromClick();
   state.starting=true;$('start').disabled=true;status('センサーの許可を確認しています…');
@@ -106,7 +123,7 @@ $('start').addEventListener('click',async()=>{
     state.running=true;state.generation++;state.baseline=null;state.calibration=null;state.lastVideoTime=-1;state.lastFrame=0;
     $('modelStatus').textContent=`顔推定：${state.mode}`;
     $('diagnostics').textContent=JSON.stringify({app:`posture-lab/${APP_VERSION}`,mediapipe:MP_VERSION,model:MODEL,browser:navigator.userAgent,settings:state.cameraSettings,supportedConstraints:navigator.mediaDevices.getSupportedConstraints(),screenAngle:screenAngle(),inference:state.mode},null,2);
-    $('stop').disabled=false;$('retryImu').disabled=false;
+    $('stop').disabled=false;$('retryImu').disabled=false;$('calibStart').disabled=false;refreshCalibStatus();
     status('準備できました。縦持ちで顔を正面に向け、基準姿勢を記録してください。');
     track.addEventListener('ended',()=>{if(state.running){stop();status('カメラが切断されました。再度開始してください。',true);}});
     await wake();requestAnimationFrame(tick);
@@ -116,7 +133,7 @@ $('start').addEventListener('click',async()=>{
 $('retryImu').addEventListener('click',()=>{permissionsFromClick();});
 $('stop').addEventListener('click',stop);
 function stop(){
-  dismissNextRecord();
+  dismissNextRecord();endCalibration();$('calibStart').disabled=true;
   if(state.recording)endRecord('camera_stopped');
   state.running=false;state.generation++;state.pending=null;state.collect=null;state.latest=null;
   clearTimeout(state.timer);state.worker?.terminate();state.worker=null;state.detector?.close();state.detector=null;
@@ -132,6 +149,7 @@ function stop(){
 function tick(t){
   if(!state.running)return;
   requestAnimationFrame(tick);
+  if(state.calib)return;   // カメラ校正中は顔推定を止める
   const period=state.mode.startsWith('worker')?67:125;
   if(document.hidden||state.pending||video.readyState<2||t-state.lastFrame<period||video.currentTime===state.lastVideoTime)return;
   if(video.videoWidth!==state.imageSize[0]||video.videoHeight!==state.imageSize[1]){
@@ -170,6 +188,10 @@ function consume(result,p){
   const z=irisValid?(state.calibration?state.calibration.k/iris.p:f*cfg.irisMm/iris.p/10):null;
   const ratio=irisValid&&state.baseline?state.baseline.irisPx/iris.p*100:null;
   const delta=head!==null&&state.baseline?.head!==null&&state.baseline?.head!==undefined?head-state.baseline.head:null;
+  // f を使った値（0.2.0）：Z = f × 11.7 mm ÷ 虹彩径、目の中点の主点（画像の中心）からのずれ（cm）＝ 画素 × Z / f
+  const fc=focal(),tilt=deviceTilt(fresh?upFromOrientation(p.o):null);
+  const zf=iris&&iris.p>0?fc.f*SETUP.irisMm/iris.p/10:null;
+  const ex=iris?iris.center[0]*canvas.width-canvas.width/2:null,ey=iris?iris.center[1]*canvas.height-canvas.height/2:null;
   const row={t:p.t,processedAt:now,videoTime:p.videoTime,inferenceMs:result.inferenceMs,deliveryMs:now-p.t,
     width:canvas.width,height:canvas.height,screenAngle:p.angle,faceDetected:!!pose,faceValid,irisValid,imuValid:fresh&&portraitFrame,
     orientationReceivedAt:p.o?.t??null,orientationEventTimestamp:p.o?.eventTimestamp??null,imuAgeMs:age,
@@ -180,9 +202,13 @@ function consume(result,p){
     pitch:pose?.pitch??null,yaw:pose?.yaw??null,roll:pose?.roll??null,headInclination:head,headDelta:delta,
     provisionalCva:provisionalCva(delta),irisPx:iris?.p??null,irisLeftPx:iris?.left??null,irisRightPx:iris?.right??null,
     eyeX:iris?.center[0]??null,eyeY:iris?.center[1]??null,distanceCm:z,distanceRatioPercent:ratio,
-    distanceMode:state.calibration?'one-point-calibrated':'assumed-fov',...cfg,matrix:pose?.matrix??null,matrixColumnMajor:pose?.columnMajor??null};
+    distanceMode:state.calibration?'one-point-calibrated':'assumed-fov',...cfg,
+    focalPx:fc.f,focalSource:fc.source,zFocalCm:zf,eyeOffsetXPx:ex,eyeOffsetYPx:ey,
+    eyeOffsetXCm:zf!==null?ex*zf/fc.f:null,eyeOffsetYCm:zf!==null?ey*zf/fc.f:null,
+    deviceTiltLRDeg:tilt?.lr??null,deviceTiltFBDeg:tilt?.fb??null,
+    matrix:pose?.matrix??null,matrixColumnMajor:pose?.columnMajor??null};
   state.latest=row;
-  draw(result.landmarks);
+  draw(result.landmarks);updateSetup(row,iris);
   if(state.recording){state.session.frames.push(row);state.dirty=true;}
   state.frames.push(now);state.frames=state.frames.filter(x=>now-x<2000);
   $('fps').textContent=`${(state.frames.length/2).toFixed(1)} fps`;
@@ -212,6 +238,121 @@ function draw(lm){
   for(const indices of [[469,470,471,472],[474,475,476,477]]){ctx.beginPath();indices.forEach((i,j)=>{const p=lm[i];if(p)j?ctx.lineTo(p.x*canvas.width,p.y*canvas.height):ctx.moveTo(p.x*canvas.width,p.y*canvas.height);});ctx.closePath();ctx.stroke();}
   for(const i of [1,468,473])if(lm[i]){ctx.beginPath();ctx.arc(lm[i].x*canvas.width,lm[i].y*canvas.height,3,0,2*Math.PI);ctx.stroke();}
 }
+// ---- セットアップ画面：傾き → 高さ → 距離（固定のときだけ合否を判定。手持ちは目安）
+function setItem(id,cls,value,note){const el=$(id);el.className=`setup-item ${cls}`;el.querySelector('b').textContent=value;el.querySelector('small').textContent=note;}
+function updateSetup(row,iris){
+  if(state.calib)return;
+  const stand=$('holdMode').value==='stand',target=Number($('targetDistance').value)||40,w=canvas.width,h=canvas.height;
+  // 映像の上に主点の高さの横線と、両目の中点を描く（CSSで鏡像表示しても横線と高さは変わらない）
+  ctx.save();ctx.strokeStyle='#ffd34d';ctx.lineWidth=Math.max(2,w/240);ctx.setLineDash([w/40,w/60]);ctx.beginPath();ctx.moveTo(0,h/2);ctx.lineTo(w,h/2);ctx.stroke();ctx.setLineDash([]);
+  if(iris){ctx.fillStyle='#ffd34d';ctx.beginPath();ctx.arc(iris.center[0]*w,iris.center[1]*h,Math.max(4,w/90),0,2*Math.PI);ctx.fill();}
+  ctx.restore();
+  const t=row.deviceTiltLRDeg,fbk=row.deviceTiltFBDeg,res={};
+  if(t===null){setItem('setupTilt','ng','—','IMUの方向を受信していません');res.tilt=false;}
+  else{
+    res.tilt=Math.abs(t)<=SETUP.tiltTolDeg&&Math.abs(fbk)<=SETUP.tiltTolDeg;
+    const words=[Math.abs(t)>SETUP.tiltTolDeg?`上端が${t>0?'左':'右'}に${Math.abs(t).toFixed(1)}°`:'',Math.abs(fbk)>SETUP.tiltTolDeg?`上端が${fbk>0?'奥へ':'手前へ'}${Math.abs(fbk).toFixed(1)}°`:''].filter(Boolean).join('、');
+    setItem('setupTilt',stand?(res.tilt?'ok':'ng'):'info',`左右 ${t.toFixed(1)}° 前後 ${fbk.toFixed(1)}°`,res.tilt?'垂直です':`${words}傾いています`);
+  }
+  if(!iris||!(iris.p>0)){setItem('setupHeight','ng','—','両目が見えません');setItem('setupDistance','ng','—','両目が見えません');res.height=res.distance=false;}
+  else{
+    // 目が横線より下に写る＝カメラが目より高い → スタンドを下げる
+    const dyCm=row.eyeOffsetYPx*SETUP.irisMm/iris.p/10;res.height=Math.abs(dyCm)<=SETUP.heightTolCm;
+    setItem('setupHeight',stand?(res.height?'ok':'ng'):'info',`${dyCm>=0?'+':''}${dyCm.toFixed(1)} cm`,res.height?'目の高さです':`スタンドを あと ${Math.abs(dyCm).toFixed(1)} cm ${dyCm>0?'下げる':'上げる'}`);
+    const z=row.zFocalCm,dz=z-target;res.distance=Math.abs(dz)<=SETUP.distanceTolCm;
+    setItem('setupDistance',stand?(res.distance?'ok':'ng'):'info',`${z.toFixed(1)} cm`,res.distance?`目標 ${target} cm です`:`あと ${Math.abs(dz).toFixed(1)} cm ${dz>0?'近づく':'離れる'}${row.focalSource==='charuco'?'':'（f 未校正）'}`);
+    res.heightCm=dyCm;res.distanceCm=z;
+  }
+  const all=res.tilt&&res.height&&res.distance,now=performance.now();
+  if(stand&&all){state.setupPassSince??=now;}else state.setupPassSince=null;
+  const passed=stand&&all&&now-state.setupPassSince>=SETUP.stableMs;
+  if(passed&&!state.setupPassed){beep(880,120);setTimeout(()=>beep(1320,180),160);}
+  state.setupPassed=passed;
+  state.setupLive={mode:stand?'stand':'hand',targetCm:target,tiltLRDeg:t,tiltFBDeg:fbk,heightOffsetCm:res.heightCm??null,distanceCm:res.distanceCm??null,
+    tiltOK:!!res.tilt,heightOK:!!res.height,distanceOK:!!res.distance,passed,focalPx:row.focalPx,focalSource:row.focalSource,irisMmAssumed:SETUP.irisMm};
+  $('setupStatus').textContent=!stand?'手持ち：高さと距離は目安です。基準の姿勢で「この姿勢を基準にする」を押してください。':passed?'セットアップ合格。そのまま「この姿勢を基準にする（3秒）」を押してください。':'固定：①傾き → ②高さ → ③距離 の順に合わせてください。3つとも緑になると音が鳴ります。';
+  if(!state.recording&&!state.collect){
+    const b=$('previewBadge');b.hidden=false;
+    const mark=(ok,txt)=>stand?`<span class="${ok?'ok':'ng'}">${ok?'✓':'×'} ${txt}</span>`:txt;
+    b.innerHTML=passed?'<span class="ok big">✓ セットアップ合格</span>':[mark(res.tilt,`傾き ${t===null?'—':`${t.toFixed(1)}° / ${fbk.toFixed(1)}°`}`),mark(res.height,`高さ ${res.heightCm===undefined?'—':`${res.heightCm>=0?'+':''}${res.heightCm.toFixed(1)} cm`}`),mark(res.distance,`距離 ${res.distanceCm===undefined?'—':`${res.distanceCm.toFixed(1)} cm`}`)].join('<br>');
+  }else $('previewBadge').hidden=true;
+}
+
+// ---- カメラ校正（ChArUco）。OpenCV.js は校正を始めたときだけ読み込む
+function refreshCalibStatus(){
+  const c=loadCameraCalibration(),w=canvas.width,h=canvas.height;
+  if(c&&!state.calib&&!refreshCalibStatus.opened){$('calibCard').open=false;refreshCalibStatus.opened=true;}   // 校正済みなら最初は閉じておく
+  $('calibExport').disabled=!c;$('calibClear').disabled=!c;
+  if(!c){$('calibStatus').textContent='未校正です。校正するまでは、仮の画角から求めた f を使います。';return;}
+  const same=!state.running||(c.width===w&&c.height===h);
+  $('calibStatus').textContent=`校正済み：f = ${c.focalPx.toFixed(1)} px（再投影誤差 ${c.rmsPx.toFixed(2)} px、${c.width}×${c.height}、${new Date(c.createdAt).toLocaleString('ja-JP')}）${same?'':` ／ 注意：いまの解像度（${w}×${h}）と違うため使いません。校正し直してください。`}`;
+  $('calibStatus').classList.toggle('error',!same);
+}
+async function startCalibration(){
+  if(!state.running||state.calib||state.recording||state.collect)return;
+  const squareMm=Number($('squareMm').value);
+  if(!(squareMm>=10&&squareMm<=100)){status('マスの実寸を10〜100 mmで入力してください。',true);return;}
+  $('calibStart').disabled=true;$('calibCancel').disabled=false;
+  $('calibStatus').textContent='OpenCV.js を読み込んでいます（初回は数十秒かかります）…';
+  try{
+    const mod=await import('./calib.js'),{cv}=await mod.loadOpenCV();
+    if(!state.running)return;
+    const w=video.videoWidth,h=video.videoHeight,fGuess=w/(2*Math.tan(rad(60)/2));
+    const grab=document.createElement('canvas');grab.width=w;grab.height=h;
+    state.calib={mod,cv,cal:new mod.CharucoCalibrator(cv,{squareMm,width:w,height:h,fGuess}),grab,gctx:grab.getContext('2d',{willReadFrequently:true}),last:0,startedAt:new Date().toISOString(),squareMm};
+    ctx.clearRect(0,0,canvas.width,canvas.height);document.querySelector('.preview').scrollIntoView({behavior:'smooth',block:'start'});
+    status('カメラ校正中です。ボードを前でゆっくり動かしてください（向きと位置を変えながら、少し斜めに）。');
+    requestAnimationFrame(calibTick);
+  }catch(e){$('calibStatus').textContent=`校正を始められません：${e.message}`;$('calibStatus').classList.add('error');endCalibration();}
+}
+function calibTick(t){
+  const c=state.calib;if(!c||!state.running)return;
+  requestAnimationFrame(calibTick);
+  if(t-c.last<c.mod.CALIB_RULES.intervalMs||video.readyState<2)return;
+  c.last=t;
+  c.gctx.drawImage(video,0,0,c.grab.width,c.grab.height);
+  let r;try{r=c.cal.process(c.gctx.getImageData(0,0,c.grab.width,c.grab.height));}catch(e){$('calibStatus').textContent=`検出でエラー：${e.message||e}`;return;}
+  ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle=r.accepted?'#8ff0cf':'#ffd34d';
+  for(const q of r.img)ctx.fillRect(q[0]-5,q[1]-5,10,10);
+  const n=c.cal.views.length,N=c.mod.CALIB_RULES.targetFrames;
+  if(r.accepted)beep(1200,90);
+  const b=$('previewBadge');b.hidden=false;
+  b.innerHTML=`<span class="big">${n} / ${N} 枚</span><br>角 ${r.ids.length}/12${r.tiltDeg!==undefined?`・傾き ${r.tiltDeg.toFixed(0)}°`:''}<br>${r.accepted?'<span class="ok">採用しました</span>':r.reason||''}`;
+  $('calibStatus').textContent=`採用 ${n}/${N} 枚。${r.accepted?'採用しました。':r.reason||''}`;
+  if(n>=N)finishCalibration();
+}
+function finishCalibration(){
+  const c=state.calib;if(!c)return;
+  $('calibStatus').textContent='計算しています…';
+  const r=c.cal.compute();
+  if(!r.focalPx){$('calibStatus').textContent=`計算できませんでした：${r.error}。もう一度校正してください。`;$('calibStatus').classList.add('error');endCalibration();return;}
+  const result={app:`posture-lab/${APP_VERSION}`,createdAt:new Date().toISOString(),startedAt:c.startedAt,width:c.cal.width,height:c.cal.height,
+    focalPx:r.focalPx,rmsPx:r.rmsPx,passed:r.ok,method:r.method,opencvVersion:c.mod.OPENCV_VERSION,board:{...c.mod.BOARD,squareMm:c.squareMm,legacyPatternUsed:r.legacyPattern},
+    model:'pinhole; principal point fixed at image centre; fx = fy; zero distortion',rules:c.mod.CALIB_RULES,frames:r.frames,corners:r.corners,
+    opencv:r.opencv,own:r.own,opencvError:r.opencvError,ownMinusOpencvPercent:r.ownMinusOpencvPercent,
+    hfovDeg:2*deg(Math.atan(c.cal.width/2/r.focalPx)),browser:navigator.userAgent,views:c.cal.views};
+  if(r.ok){
+    camCalCache=undefined;try{localStorage.setItem(CAMERA_CALIB_KEY,JSON.stringify(result));}catch(e){status(`校正結果を端末に保存できません：${e.message}`,true);}
+    beep(880,120);setTimeout(()=>beep(1320,220),160);
+    status(`カメラ校正に合格しました：f = ${r.focalPx.toFixed(1)} px（再投影誤差 ${r.rmsPx.toFixed(2)} px）。`);
+  }else{
+    state.lastFailedCalibration=result;
+    status(`再投影誤差が ${r.rmsPx.toFixed(2)} px で、合格（1 px未満）になりませんでした。ボードを平らにして、もう一度校正してください。`,true);
+  }
+  endCalibration();refreshCalibStatus();
+  if(!r.ok)$('calibStatus').textContent=`不合格：f = ${r.focalPx.toFixed(1)} px、再投影誤差 ${r.rmsPx.toFixed(2)} px（1 px未満で合格）。保存していません。`;
+}
+function endCalibration(){
+  state.calib?.cal?.dispose();state.calib=null;
+  $('calibStart').disabled=!state.running;$('calibCancel').disabled=true;$('previewBadge').hidden=true;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+$('calibStart').addEventListener('click',()=>{beep(440,1,.001);startCalibration();});
+$('calibCancel').addEventListener('click',()=>{endCalibration();status('カメラ校正を中止しました。');refreshCalibStatus();});
+$('calibClear').addEventListener('click',()=>{camCalCache=undefined;try{localStorage.removeItem(CAMERA_CALIB_KEY);}catch{}refreshCalibStatus();status('カメラ校正を消去しました。仮の画角に戻ります。');});
+$('calibExport').addEventListener('click',()=>{const c=loadCameraCalibration();if(c)download(`camera-calibration-${c.createdAt.replace(/[:.]/g,'-')}.json`,JSON.stringify(c,null,1),'application/json');});
+refreshCalibStatus();
+
 function clearValues(){for(const id of ['headDelta','cva','distance','ratio','pitch','yawRoll','deviceAngles','acceleration','rotationRate','iris','imuAge','latency'])$(id).textContent='—';ctx.clearRect(0,0,canvas.width,canvas.height);}
 
 function startCollection(type){
@@ -239,7 +380,11 @@ function collectFrame(row){
   const irisPx=median(diameters);
   if(c.type==='baseline'){
     const head=heads.length>=Math.max(15,rows.length*.8)?median(heads):null;
-    state.baseline={t:performance.now(),irisPx,head,frames:rows.length,validImuFrames:heads.length,...config()};
+    const md=k=>{const v=rows.map(r=>r[k]).filter(x=>x!==null&&x!==undefined);return v.length?median(v):null;};
+    const sl=state.setupLive;
+    state.baseline={t:performance.now(),irisPx,head,frames:rows.length,validImuFrames:heads.length,...config(),
+      setup:{mode:$('holdMode').value,targetCm:Number($('targetDistance').value)||40,passedAtStart:!!sl?.passed,tiltLRDeg:md('deviceTiltLRDeg'),tiltFBDeg:md('deviceTiltFBDeg'),
+        heightOffsetCm:irisPx>0&&md('eyeOffsetYPx')!==null?md('eyeOffsetYPx')*SETUP.irisMm/irisPx/10:null,distanceCm:md('zFocalCm'),focalPx:md('focalPx'),focalSource:rows.at(-1).focalSource,irisMmAssumed:SETUP.irisMm,tolerances:{...SETUP}}};
     $('baselineStatus').textContent=head===null?'基準取得済み。ただしIMU不足のため距離比のみ。IMU許可後に取り直してください。':`基準取得済み（${rows.length}フレーム）。表示を基準からの変化に切り替えました。`;
     status(head===null?'基準の距離比を記録しました。頭部補正にはIMUの受信が必要です。':'基準を記録しました。姿勢や端末の向きをゆっくり変えてください。');
   }else{
@@ -308,7 +453,7 @@ async function writeCheckpoint(reset){
   }catch{state.storageOK=false;}
   finally{state.saveBusy=false;}
 }
-function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance'])$(id).disabled=locked;}
+function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance','holdMode','targetDistance','squareMm'])$(id).disabled=locked;$('calibStart').disabled=locked||!state.running;}
 $('record').addEventListener('click',()=>{
   if(state.recording||state.recordStarting||!state.running||!state.baseline)return;
   if(state.dirty){
@@ -352,6 +497,7 @@ async function startRecording(){
 function beginSession(){
   const id=`posture-${new Date().toISOString().replace(/[:.]/g,'-')}`;
   state.session={meta:{id,version:APP_VERSION,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
+    holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[]};
   state.saved={frames:0,motion:0,orientation:0,events:0};state.chunk=1;
@@ -447,3 +593,4 @@ $('recover').addEventListener('click',()=>{
   download(`${result.meta.id}-recovered.json`,JSON.stringify(result),'application/json');
 });
 window.addEventListener('beforeunload',e=>{if(state.dirty){e.preventDefault();e.returnValue='';}});
+window.__pl=state;   // 動作確認用

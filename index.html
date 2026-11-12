@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#102c36">
   <title>姿勢ラボ — 実験用プロトタイプ</title>
-  <link rel="stylesheet" href="styles.css?v=0.1.1">
+  <link rel="stylesheet" href="styles.css?v=0.2.0-1">
 </head>
 <body>
 <main>
-  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.1.1</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
+  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.2.0（作業中）</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
   <p class="intro">前面カメラと端末の動きから、基準姿勢からの変化を記録します。縦持ち・着座で使用してください。</p>
   <section class="card setup">
     <h2>1 <span>カメラとセンサーを開始</span></h2>
@@ -18,13 +18,32 @@
     <p id="status" role="status" aria-live="polite">準備できたら開始してください。スマートフォンではHTTPS接続が必要です。</p>
     <div class="chips"><span id="cameraStatus">カメラ：待機</span><span id="imuStatus">IMU：待機</span><span id="modelStatus">顔推定：待機</span></div>
   </section>
+  <details class="card" id="calibCard" open>
+    <summary><h2>2 <span>カメラ校正 <small>iPhone 1台につき1回</small></span></h2></summary>
+    <p>内カメラの焦点距離 f（画素）を、ChArUco ボード（4列×5行、DICT_4X4_50、白黒反転）で求めます。スマホをスタンドに縦向きで立て、カメラを開始してから「校正を始める」を押し、ボードを前で20〜30秒ゆっくり動かしてください（30〜50 cm、向きと位置を変えながら、少し斜めに）。条件を満たすフレームを自動で15枚集め（採用のたびに音が鳴ります）、計算します。再投影誤差が1 px未満で合格です。計算は端末の中だけで行います。</p>
+    <div class="input-row"><label>マスの実寸（mm）<input id="squareMm" type="number" inputmode="decimal" min="10" max="100" step="0.1" value="46.0"></label><button id="calibStart" class="primary" disabled>校正を始める</button><button id="calibCancel" disabled>中止</button></div>
+    <div class="actions"><button id="calibExport" disabled>校正結果をJSONで保存</button><button id="calibClear" disabled>校正を消去</button></div>
+    <p id="calibStatus" class="note" aria-live="polite">未校正です。校正するまでは、仮の画角から求めた f を使います。</p>
+    <p class="note">マスの実寸は f には影響しません（記録のため、4マス分を定規で測って4で割った値を入れてください）。計測と同じ解像度・縦向きで校正します。解像度が変わったら校正し直してください。初回は OpenCV.js（約10 MB）を読み込みます。</p>
+  </details>
   <div class="layout">
     <section class="card camera-card">
-      <div class="preview"><video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas><div id="previewHint">前面カメラの映像</div><span class="mirror-label">鏡像表示</span></div>
+      <div class="preview"><video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas><div id="previewHint">前面カメラの映像</div><span class="mirror-label">鏡像表示</span><div id="previewBadge" hidden></div></div>
       <div class="camera-foot"><span id="quality">顔を正面に向けてください</span><span id="fps">— fps</span></div>
     </section>
     <section class="card">
-      <h2>2 <span>基準姿勢を記録</span></h2>
+      <h2>3 <span>セットアップと基準姿勢</span></h2>
+      <div class="input-row">
+        <label>持ち方<select id="holdMode"><option value="stand">固定（スタンド）</option><option value="hand">手持ち</option></select></label>
+        <label>目標の距離（cm）<input id="targetDistance" type="number" inputmode="decimal" min="20" max="80" step="0.5" value="40"></label>
+      </div>
+      <div class="setup-grid" id="setupGrid">
+        <div class="setup-item" id="setupTilt"><span>① 傾き（垂直 ±1°）</span><b>—</b><small>—</small></div>
+        <div class="setup-item" id="setupHeight"><span>② 高さ（目が横線の上 ±1 cm）</span><b>—</b><small>—</small></div>
+        <div class="setup-item" id="setupDistance"><span>③ 距離（目標 ±1 cm）</span><b>—</b><small>—</small></div>
+      </div>
+      <p id="setupStatus" class="note" aria-live="polite">カメラを開始すると、傾き → 高さ → 距離の順に案内します。</p>
+      <h3 class="sub">基準姿勢を記録</h3>
       <p>楽に背筋を伸ばして正面を向き、スマートフォンと頭を3秒間静止させます。この操作でCVAの実測値は分かりません。</p>
       <button id="baseline" class="primary" disabled>この姿勢を基準にする（3秒）</button>
       <p id="baselineStatus" class="note" aria-live="polite">基準姿勢：未設定</p>
@@ -38,13 +57,13 @@
     </section>
   </div>
   <section class="card">
-    <h2>3 <span>距離の校正 <small>任意</small></span></h2>
+    <h2>4 <span>距離の校正（1点・メジャー） <small>任意</small></span></h2>
     <p>測らずに開始できます。距離を補正する場合は、両目の中央を画面中央付近に置き、前面レンズから目までを測ります。校正中はその距離を維持してください。</p>
     <div class="input-row"><label>実測した距離（cm）<input id="knownDistance" type="number" inputmode="decimal" min="15" max="100" step="0.1" placeholder="例：40.0"></label><button id="calibrate" disabled>この距離で校正（3秒）</button><button id="clearCalibration" disabled>校正を解除</button></div>
     <p id="calibrationStatus" class="note" aria-live="polite">未校正です。基準からの距離比は実測値なしで表示できます。</p>
   </section>
   <section class="card">
-    <h2>4 <span>計測を記録</span></h2>
+    <h2>5 <span>計測を記録</span></h2>
     <p>数値・時刻・計算条件を端末内に記録します。映像は記録しません。実験終了時にファイルを保存してください。</p>
     <div class="actions"><button id="record" class="primary" disabled>記録開始</button><button id="endRecord" disabled>記録停止</button><button id="exportCsv" disabled>計測CSVを保存</button><button id="exportJson" disabled>全記録JSONを保存</button><button id="recover" hidden>前回の中断記録を保存</button></div>
     <div id="nextRecordPanel" class="notice" role="group" aria-label="次の記録を開始" hidden>
@@ -64,6 +83,6 @@
   </details>
   <footer>姿勢ラボ / 教授説明・実機確認用の試作。角度・距離・軸の対応は未検証です。<br>MediaPipeを使用。<a href="https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE" target="_blank" rel="noopener">ライセンス</a></footer>
 </main>
-<script type="module" src="app.js?v=0.1.1"></script>
+<script type="module" src="app.js?v=0.2.0-1"></script>
 </body>
 </html>
