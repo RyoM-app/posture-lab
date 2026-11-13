@@ -2,7 +2,7 @@ import {rad,deg,clamp,median,sd,mean,faceRotation,headInclination,headInclinatio
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
-const APP_VERSION='0.2.0';
+const APP_VERSION='0.2.1';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
@@ -16,7 +16,11 @@ const state={running:false,starting:false,stream:null,worker:null,detector:null,
   imageSize:null,timer:null,storageOK:true,saveBusy:false,saveTask:null,recordStarting:false,awaitingNext:false,archives:new Map(),lastCheckpoint:0,saved:{frames:0,motion:0,orientation:0,events:0},chunk:1};
 
 // ---- 終了時の品質判定（本実験の「事前に決める除外基準」の代わり。区間を知らないので5秒窓で見る）
-const QUALITY={windowSec:5,windowStepSec:.5,minWindowRate:.7,maxHGapSec:2,imuGapMs:250,standMoveDeg:1,standReturnDeg:.5};
+// 0.2.1：h の割合と途切れは「顔が写っているのに h が出ない」フレームだけで判定する（顔が写っていない時間は別に表示）。
+//        スタンドの動きは記録開始時の1秒間の上向きと比べ、2°を超えたら。基準が5分以上前なら取り直すよう表示する
+const QUALITY={windowSec:5,windowStepSec:.5,minWindowRate:.7,maxHGapSec:2,imuGapMs:250,standMoveDeg:2,standReturnDeg:1,standRefMs:1000,
+  baselineMaxAgeSec:300,noFaceMinSec:.5,touchNearMs:300,stopHoldMs:1000};
+const IRIS_OCCLUDED_OPEN=.15;   // eyeOpenMin がこれ未満なら、まぶたが虹彩を隠している（zFocalCm が大きく出る）として irisOccluded = true
 // IMU：方向（deviceorientation）が古いときは、加速度（devicemotion）の重力成分から上向きを求める予備の経路を使う
 const IMU={maxAgeMs:250,gravityLowPass:.2};   // 重力成分は指数平滑（60 Hzで約80 ms）して手の動きを抑える
 const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
@@ -220,6 +224,11 @@ function consume(result,p){
   const stand=(state.recording?state.session.meta.holdMode:$('holdMode').value)==='stand',bUp=state.baseline?.up??null;
   const hFixed=stand&&bUp&&pose&&portraitFrame?headInclinationFromUp(pose,bUp):null;
   const standChange=stand&&bUp&&up?deg(Math.acos(clamp(dot3(up,bUp),-1,1))):null;
+  // 記録開始時の1秒間の上向きの平均と比べる（0.2.1。スタンドの動きの判定はこちら）
+  const sw=state.recording?state.standWatch:null;
+  if(sw&&stand&&up&&!sw.ref){if(p.t-state.session.meta.start<QUALITY.standRefMs){sw.acc[0]+=up[0];sw.acc[1]+=up[1];sw.acc[2]+=up[2];sw.n++;}
+    else if(sw.n){const m=Math.hypot(...sw.acc);sw.ref=sw.acc.map(x=>x/m);state.session.meta.standReference={up:sw.ref,frames:sw.n,windowMs:QUALITY.standRefMs};}}
+  const standFromStart=sw?.ref&&up?deg(Math.acos(clamp(dot3(up,sw.ref),-1,1))):null;
   const reasons=[];
   if(!pose)reasons.push('no_face');
   else{if(Math.abs(pose.yaw)>25)reasons.push('yaw');if(Math.abs(pose.pitch)>40)reasons.push('pitch');if(Math.abs(pose.roll)>25)reasons.push('roll');}
@@ -247,16 +256,16 @@ function consume(result,p){
     headInclinationRaw:hRaw,headInclinationOrientation:hO,headInclinationMotion:hM,headInclinationFixedUp:hFixed,
     imuSource,motionAgeMs:mAge,gravitySign:state.gravSign??null,gravitySignSource:state.gravSignSource??null,
     gravityLPx:p.m?.gravityLP?.x??null,gravityLPy:p.m?.gravityLP?.y??null,gravityLPz:p.m?.gravityLP?.z??null,
-    upX:up?.[0]??null,upY:up?.[1]??null,upZ:up?.[2]??null,standTiltChangeDeg:standChange,invalidReasons:reasons.join('|'),
+    upX:up?.[0]??null,upY:up?.[1]??null,upZ:up?.[2]??null,standTiltChangeDeg:standChange,standTiltChangeFromStartDeg:standFromStart,invalidReasons:reasons.join('|'),
     irisRightHPx:iris?.rightHV.h??null,irisRightVPx:iris?.rightHV.v??null,irisLeftHPx:iris?.leftHV.h??null,irisLeftVPx:iris?.leftHV.v??null,
-    eyeOpenRight:iris?.openRight??null,eyeOpenLeft:iris?.openLeft??null,eyeOpenMin:iris?.open??null,
+    eyeOpenRight:iris?.openRight??null,eyeOpenLeft:iris?.openLeft??null,eyeOpenMin:iris?.open??null,irisOccluded:n(iris?.open)!==null?iris.open<IRIS_OCCLUDED_OPEN:null,
     eyelidGapRightPx:iris?.eyelidGapPx.right??null,eyelidGapLeftPx:iris?.eyelidGapPx.left??null,
     ...Object.fromEntries(IRIS_POINTS.flatMap(i=>[[`iris${i}X`,iris?.points[i][0]??null],[`iris${i}Y`,iris?.points[i][1]??null]])),
     matrix:pose?.matrix??null,matrixColumnMajor:pose?.columnMajor??null};
-  if(state.recording&&standChange!==null){   // 固定の記録中に端末の傾きが基準から1°以上変わったらイベントにする
-    const st=state.standWatch;st.max=Math.max(st.max,standChange);
-    if(!st.moved&&standChange>QUALITY.standMoveDeg){st.moved=true;st.count++;event('stand_moved',{angleDeg:standChange,source:imuSource});}
-    else if(st.moved&&standChange<QUALITY.standReturnDeg){st.moved=false;event('stand_returned',{angleDeg:standChange,source:imuSource});}
+  if(sw&&standFromStart!==null){   // 固定の記録中に端末の傾きが記録開始時から2°を超えたらイベントにする
+    if(standFromStart>sw.max){sw.max=standFromStart;sw.maxAtSec=(p.t-state.session.meta.start)/1000;}
+    if(!sw.moved&&standFromStart>QUALITY.standMoveDeg){sw.moved=true;sw.count++;event('stand_moved',{angleDeg:standFromStart,source:imuSource,reference:'record_start'});}
+    else if(sw.moved&&standFromStart<QUALITY.standReturnDeg){sw.moved=false;event('stand_returned',{angleDeg:standFromStart,source:imuSource,reference:'record_start'});}
   }
   state.latest=row;
   draw(result.landmarks);updateSetup(row,iris);
@@ -494,8 +503,8 @@ async function writeCheckpoint(reset){
   const s=state.session;
   try{
     const d=await db();
-    const counts=Object.fromEntries(['frames','motion','orientation','events'].map(k=>[k,s[k].length]));
-    const chunk={id:state.chunk};for(const k of Object.keys(counts))chunk[k]=s[k].slice(reset?0:state.saved[k],counts[k]);
+    const counts=Object.fromEntries(['frames','motion','orientation','events','inputs'].map(k=>[k,(s[k]||[]).length]));
+    const chunk={id:state.chunk};for(const k of Object.keys(counts))chunk[k]=(s[k]||[]).slice(reset?0:(state.saved[k]||0),counts[k]);
     const tx=d.transaction('chunks','readwrite'),store=tx.objectStore('chunks');
     const done=finishTransaction(tx);
     if(reset)store.clear();
@@ -540,7 +549,7 @@ async function startRecording(){
     if(!state.running||document.hidden||generation!==state.generation||state.baseline!==baseline)return;
     beginSession();
     // A checkpoint failure must not suspend live capture or leave the UI locked.
-    checkpoint(true);updateRecording();status('新しい記録を開始しました。');
+    checkpoint(true);updateRecording();if(state.session.meta.baselineAgeSec<QUALITY.baselineMaxAgeSec)status('新しい記録を開始しました。');
   }catch(e){status(`次の記録を開始できませんでした：${e.message} 前の記録は保持しています。CSV／JSONを保存できます。`,true);}
   finally{
     state.recordStarting=false;$('continueRecord').disabled=false;refreshSessionSelect();
@@ -556,60 +565,118 @@ function beginSession(){
   state.session={meta:{id,version:APP_VERSION,subject,clock,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
     holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
-    limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[]};
-  state.saved={frames:0,motion:0,orientation:0,events:0};state.chunk=1;state.standWatch={moved:false,count:0,max:0};$('qualityBox').hidden=true;
-  state.recording=true;state.dirty=true;event('record_start');lockSettings(true);wake();   // 記録中は画面を消さない
+    limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[],inputs:recentInputs()};
+  state.saved={frames:0,motion:0,orientation:0,events:0,inputs:0};state.chunk=1;state.standWatch={moved:false,count:0,max:0,maxAtSec:null,ref:null,acc:[0,0,0],n:0};$('qualityBox').hidden=true;
+  const bAge=(state.session.meta.start-state.baseline.t)/1000;state.session.meta.baselineAgeSec=bAge;
+  state.recording=true;state.dirty=true;event('record_start',{baselineAgeSec:bAge});lockSettings(true);wake();   // 記録中は画面を消さない
+  if(bAge>=QUALITY.baselineMaxAgeSec){event('baseline_stale',{baselineAgeSec:bAge});status(`基準（「この姿勢を基準にする」）が ${(bAge/60).toFixed(0)}分前のものです。この回を止めて、基準を取り直してから記録してください。`,true);}
+  setRecordingScreen(true,bAge>=QUALITY.baselineMaxAgeSec?bAge:null);
   $('record').disabled=true;$('endRecord').disabled=false;
   $('exportCsv').disabled=true;$('exportJson').disabled=true;
   refreshSessionSelect();$('sessionSelect').value='current';$('sessionSelect').disabled=true;updateSaveStatus();
 }
 // ---- 終了時の品質判定。h が出たフレーム＝headInclinationRaw（有効範囲外でも数える）。固定では基準時の上向きで補った値も数える
+// 0.2.1：判定の対象は「顔が写っている」フレームだけ（顔が写っていない時間は IMU や計算の失敗ではないので、別に表示する）
+function runsOf(fr,test,t1){   // test を満たすフレームが続いた区間 [{start,end}]（end は次のフレームの時刻。最後まで続けば t1）
+  const out=[];let st=null;
+  for(let i=0;i<fr.length;i++){const ok=test(fr[i]);if(ok&&st===null)st=fr[i].t;if(!ok&&st!==null){out.push({start:st,end:fr[i].t});st=null;}}
+  if(st!==null)out.push({start:st,end:t1});return out;
+}
 function judgeQuality(s){
   const fr=s.frames,t0=s.meta.start,t1=s.meta.end??performance.now(),dur=(t1-t0)/1000,stand=s.meta.holdMode==='stand';
   const hasH=r=>r.headInclinationRaw!==null||(stand&&r.headInclinationFixedUp!==null);
+  const face=r=>!!r.faceDetected;
   const rate=(a,f)=>a.length?a.filter(f).length/a.length:null;
-  const gaps=list=>{let c=0,m=0;for(let i=1;i<list.length;i++){const g=list[i].t-list[i-1].t;if(g>QUALITY.imuGapMs)c++;m=Math.max(m,g);}return {count:c,maxMs:Math.round(m)};};
-  // 5秒窓を0.5秒ずつずらし、窓ごとに h が出たフレームの割合を求める
-  let worst=null;
+  const gapList=list=>{const g=[];for(let i=1;i<list.length;i++){const d=list[i].t-list[i-1].t;if(d>QUALITY.imuGapMs)g.push({start:list[i-1].t,end:list[i].t});}return g;};
+  const gaps=list=>{let m=0;for(let i=1;i<list.length;i++)m=Math.max(m,list[i].t-list[i-1].t);return {count:gapList(list).length,maxMs:Math.round(m)};};
+  // 5秒窓を0.5秒ずつずらし、窓ごとに「顔が写っているフレームのうち h が出た割合」を求める（顔が写ったフレームがない窓は除く）
+  let worst=null,worstAll=null;
   for(let a=0;a+QUALITY.windowSec<=dur+1e-9;a+=QUALITY.windowStepSec){
-    const w=fr.filter(r=>r.t>=t0+a*1000&&r.t<t0+(a+QUALITY.windowSec)*1000);
-    const r=w.length?w.filter(hasH).length/w.length:0;
-    if(!worst||r<worst.rate)worst={rate:r,startSec:+a.toFixed(1),frames:w.length};
+    const w=fr.filter(r=>r.t>=t0+a*1000&&r.t<t0+(a+QUALITY.windowSec)*1000),wf=w.filter(face);
+    const ra=w.length?w.filter(hasH).length/w.length:0;
+    if(!worstAll||ra<worstAll.rate)worstAll={rate:ra,startSec:+a.toFixed(1),frames:w.length};
+    if(!wf.length)continue;
+    const r=wf.filter(hasH).length/wf.length;
+    if(!worst||r<worst.rate)worst={rate:r,startSec:+a.toFixed(1),frames:wf.length};
   }
-  // h が出ない時間の最長（記録の始まりと終わりも含める）
-  const ts=[t0,...fr.filter(hasH).map(r=>r.t),t1];let gap={sec:0,startSec:0};
-  for(let i=1;i<ts.length;i++){const g=(ts[i]-ts[i-1])/1000;if(g>gap.sec)gap={sec:g,startSec:(ts[i-1]-t0)/1000};}
-  const imuGaps={orientation:gaps(s.orientation),motion:gaps(s.motion)};
-  const sw=state.standWatch||{count:0,max:0},standEvents=s.events.filter(e=>e.type==='stand_moved').length;
-  const reasons=[];
-  if(worst&&worst.rate<QUALITY.minWindowRate)reasons.push(`h が出たフレームが、${worst.startSec.toFixed(1)}〜${(worst.startSec+QUALITY.windowSec).toFixed(1)}秒の窓で ${Math.round(worst.rate*100)}%（${Math.round(QUALITY.minWindowRate*100)}%以上が必要）`);
-  if(gap.sec>=QUALITY.maxHGapSec)reasons.push(`h が ${gap.sec.toFixed(1)}秒 途切れました（${gap.startSec.toFixed(1)}秒から。${QUALITY.maxHGapSec}秒未満が必要）`);
-  if(stand&&standEvents)reasons.push(`スタンドの傾きが基準から ${QUALITY.standMoveDeg}°以上変わりました（${standEvents}回、最大 ${sw.max.toFixed(1)}°）`);
-  if(!worst)reasons.push(`記録が短すぎます（${QUALITY.windowSec}秒未満）`);
-  return {ok:!reasons.length,verdict:reasons.length?'やり直し推奨':'OK',reasons,rules:{...QUALITY,hCounted:stand?'headInclinationRaw or headInclinationFixedUp':'headInclinationRaw'},
+  // 「顔が写っているのに h が出ない」が続いた最長の時間（顔が写っていないフレームで区切る）
+  let gap={sec:0,startSec:0};
+  for(const g of runsOf(fr,r=>face(r)&&!hasH(r),t1)){const sec=(g.end-g.start)/1000;if(sec>gap.sec)gap={sec,startSec:(g.start-t0)/1000};}
+  // 顔が写っていない時間（判定には使わない。どの姿勢で外れたかを確かめるため）
+  const noFace=runsOf(fr,r=>!face(r),t1).map(g=>({startSec:(g.start-t0)/1000,endSec:(g.end-t0)/1000,sec:(g.end-g.start)/1000})).filter(g=>g.sec>=QUALITY.noFaceMinSec);
+  // IMU の途切れが画面の操作（タッチ・スクロール）と重なったか
+  const inputs=s.inputs||[],near=g=>inputs.some(e=>e.t>=g.start-QUALITY.touchNearMs&&e.t<=g.end+QUALITY.touchNearMs);
+  const detail=list=>gapList(list).map(g=>({startSec:+((g.start-t0)/1000).toFixed(2),sec:+((g.end-g.start)/1000).toFixed(2),touch:near(g)}));
+  const imuGapList={orientation:detail(s.orientation),motion:detail(s.motion)};
+  const imuGaps={orientation:{...gaps(s.orientation),withTouch:imuGapList.orientation.filter(g=>g.touch).length},motion:{...gaps(s.motion),withTouch:imuGapList.motion.filter(g=>g.touch).length}};
+  const touchesDuringRecord=inputs.filter(e=>e.t>=t0&&e.t<=t1&&/start|down/.test(e.type)).length;
+  const sw=state.standWatch||{count:0,max:0,maxAtSec:null},standEvents=s.events.filter(e=>e.type==='stand_moved').length;
+  const reasons=[],warnings=[];
+  if(worst&&worst.rate<QUALITY.minWindowRate)reasons.push(`顔が写っているのに h が出ないフレームが多い窓があります：${worst.startSec.toFixed(1)}〜${(worst.startSec+QUALITY.windowSec).toFixed(1)}秒で h が出たのは ${Math.round(worst.rate*100)}%（${Math.round(QUALITY.minWindowRate*100)}%以上が必要）`);
+  if(gap.sec>=QUALITY.maxHGapSec)reasons.push(`顔が写っているのに h が ${gap.sec.toFixed(1)}秒 出ませんでした（${gap.startSec.toFixed(1)}秒から。${QUALITY.maxHGapSec}秒未満が必要）`);
+  if(stand&&standEvents)reasons.push(`スタンドの傾きが記録開始時から ${QUALITY.standMoveDeg}°を超えて変わりました（${standEvents}回、最大 ${sw.max.toFixed(1)}°、${sw.maxAtSec?.toFixed(1)}秒）`);
+  if(!worstAll)reasons.push(`記録が短すぎます（${QUALITY.windowSec}秒未満）`);
+  else if(!worst)reasons.push('顔が一度も写っていません');
+  if((s.meta.baselineAgeSec??0)>=QUALITY.baselineMaxAgeSec)warnings.push(`基準が記録開始の ${(s.meta.baselineAgeSec/60).toFixed(0)}分前のものでした。回ごとに基準を取り直してください`);
+  if(noFace.length)warnings.push(`顔が写っていない時間：${noFace.map(g=>`${g.startSec.toFixed(1)}〜${g.endSec.toFixed(1)}秒（${g.sec.toFixed(1)}秒）`).join('、')}`);
+  return {ok:!reasons.length,verdict:reasons.length?'やり直し推奨':warnings.length?'注意':'OK',reasons,warnings,rules:{...QUALITY,hCounted:stand?'headInclinationRaw or headInclinationFixedUp':'headInclinationRaw',framesCounted:'faceDetected',standReference:'record_start'},
     durationSec:dur,frames:fr.length,fps:fr.length/Math.max(dur,1e-9),
-    faceValidRate:rate(fr,r=>r.faceValid),irisValidRate:rate(fr,r=>r.irisValid),imuValidRate:rate(fr,r=>r.imuValid),imuAnyRate:rate(fr,r=>r.imuSource!==null),
-    hRate:rate(fr,hasH),hRawRate:rate(fr,r=>r.headInclinationRaw!==null),headInclinationRate:rate(fr,r=>r.headInclination!==null),
-    worstWindow:worst,longestHGap:{sec:gap.sec,startSec:gap.startSec},imuGaps,
-    standMoved:stand?{events:standEvents,maxDeg:sw.max}:null};
+    faceDetectedRate:rate(fr,face),faceValidRate:rate(fr,r=>r.faceValid),irisValidRate:rate(fr,r=>r.irisValid),imuValidRate:rate(fr,r=>r.imuValid),imuAnyRate:rate(fr,r=>r.imuSource!==null),
+    hRate:rate(fr,hasH),hRateFace:rate(fr.filter(face),hasH),hRawRate:rate(fr,r=>r.headInclinationRaw!==null),headInclinationRate:rate(fr,r=>r.headInclination!==null),
+    worstWindow:worst,worstWindowAllFrames:worstAll,longestHGap:{sec:gap.sec,startSec:gap.startSec,framesCounted:'faceDetected'},noFace,imuGaps,imuGapList,touchesDuringRecord,
+    baselineAgeSec:s.meta.baselineAgeSec??null,
+    standMoved:stand?{events:standEvents,maxDeg:sw.max,maxAtSec:sw.maxAtSec,reference:'record_start'}:null};
 }
 function showQuality(q){
-  const pc=x=>x===null?'—':`${Math.round(x*100)}%`,box=$('qualityBox');box.hidden=false;box.className=`quality ${q.ok?'ok':'ng'}`;
-  box.innerHTML=`<strong>${q.verdict}</strong>${q.ok?'':`<ul>${q.reasons.map(r=>`<li>${r}</li>`).join('')}</ul><span>この回だけやり直してください。</span>`}
-    <dl><dt>h が出た率（全体）</dt><dd>${pc(q.hRate)}</dd><dt>最も悪い5秒窓</dt><dd>${q.worstWindow?`${pc(q.worstWindow.rate)}（${q.worstWindow.startSec.toFixed(1)}秒〜）`:'—'}</dd>
-    <dt>h の最長の途切れ</dt><dd>${q.longestHGap.sec.toFixed(1)}秒（${q.longestHGap.startSec.toFixed(1)}秒〜）</dd><dt>顔が有効</dt><dd>${pc(q.faceValidRate)}</dd><dt>IMU（方向）が有効</dt><dd>${pc(q.imuValidRate)}</dd>
-    <dt>fps</dt><dd>${q.fps.toFixed(1)}</dd><dt>IMUの途切れ（250 ms超）</dt><dd>方向 ${q.imuGaps.orientation.count}回・最長 ${(q.imuGaps.orientation.maxMs/1000).toFixed(1)}秒 ／ 加速度 ${q.imuGaps.motion.count}回・最長 ${(q.imuGaps.motion.maxMs/1000).toFixed(1)}秒</dd>
-    ${q.standMoved?`<dt>スタンドの動き</dt><dd>${q.standMoved.events}回（最大 ${q.standMoved.maxDeg.toFixed(1)}°）</dd>`:''}</dl>`;
+  const pc=x=>x===null||x===undefined?'—':`${Math.round(x*100)}%`,box=$('qualityBox');box.hidden=false;box.className=`quality ${q.ok?(q.warnings?.length?'warn':'ok'):'ng'}`;
+  const list=a=>a.length?`<ul>${a.map(r=>`<li>${r}</li>`).join('')}</ul>`:'';
+  const gl=q.imuGapList,touchLine=k=>`${q.imuGaps[k].count}回・最長 ${(q.imuGaps[k].maxMs/1000).toFixed(1)}秒（うちタッチと重なった ${q.imuGaps[k].withTouch}回）`;
+  const gapTimes=gl.orientation.length?gl.orientation.map(g=>`${g.startSec.toFixed(1)}秒（${g.sec.toFixed(1)}秒${g.touch?'・タッチあり':''}）`).join('、'):'なし';
+  box.innerHTML=`<strong>${q.verdict}</strong>${list(q.reasons)}${q.ok?'':'<span>この回だけやり直してください。</span>'}${list(q.warnings||[])}
+    <dl><dt>h が出た率（顔が写っているフレーム）</dt><dd>${pc(q.hRateFace)}（全体 ${pc(q.hRate)}）</dd><dt>最も悪い5秒窓</dt><dd>${q.worstWindow?`${pc(q.worstWindow.rate)}（${q.worstWindow.startSec.toFixed(1)}秒〜）`:'—'}</dd>
+    <dt>h の最長の途切れ（顔あり）</dt><dd>${q.longestHGap.sec.toFixed(1)}秒（${q.longestHGap.startSec.toFixed(1)}秒〜）</dd><dt>顔が写っている</dt><dd>${pc(q.faceDetectedRate)}（有効範囲内 ${pc(q.faceValidRate)}）</dd><dt>IMU（方向）が有効</dt><dd>${pc(q.imuValidRate)}</dd>
+    <dt>fps</dt><dd>${q.fps.toFixed(1)}</dd><dt>IMUの途切れ（250 ms超）</dt><dd>方向 ${touchLine('orientation')} ／ 加速度 ${touchLine('motion')}</dd>
+    <dt>方向の途切れの時刻</dt><dd>${gapTimes}</dd><dt>記録中のタッチ</dt><dd>${q.touchesDuringRecord}回</dd>
+    ${q.standMoved?`<dt>スタンドの動き（記録開始時から）</dt><dd>${q.standMoved.events}回（最大 ${q.standMoved.maxDeg.toFixed(1)}°${q.standMoved.maxAtSec!==null?`、${q.standMoved.maxAtSec.toFixed(1)}秒`:''}）</dd>`:''}</dl>`;
 }
 function endRecord(reason='user'){
   if(!state.recording)return;
-  event('record_stop',{reason});state.recording=false;state.session.meta.end=performance.now();state.session.meta.stopReason=reason;
+  event('record_stop',{reason});state.recording=false;setRecordingScreen(false);state.session.meta.end=performance.now();state.session.meta.stopReason=reason;
   state.session.meta.quality=judgeQuality(state.session);showQuality(state.session.meta.quality);
   lockSettings(false);$('endRecord').disabled=true;$('exportCsv').disabled=false;$('exportJson').disabled=false;
   refreshSessionSelect();updateSaveStatus();
   checkpoint();updateRecording();
 }
-$('endRecord').addEventListener('click',()=>endRecord());
+longPress($('endRecord'),()=>endRecord());longPress($('overlayStop'),()=>endRecord());
+// ---- 記録中の画面（0.2.1）：スクロールを止め、「画面に触れないでください」を表示。停止は1秒の長押し
+// iOS では、タッチやスクロールの処理中に方向・加速度のイベントが止まる可能性があるため
+function longPress(el,fn){
+  let timer=null;const cancel=()=>{clearTimeout(timer);timer=null;el.classList.remove('holding');};
+  el.addEventListener('pointerdown',e=>{if(el.disabled)return;e.preventDefault();cancel();el.classList.add('holding');timer=setTimeout(()=>{cancel();fn();},QUALITY.stopHoldMs);});
+  for(const t of ['pointerup','pointercancel','pointerleave'])el.addEventListener(t,cancel);
+  el.addEventListener('contextmenu',e=>e.preventDefault());
+  el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();if(!timer){el.classList.add('holding');timer=setTimeout(()=>{cancel();fn();},QUALITY.stopHoldMs);}}});
+  el.addEventListener('keyup',cancel);
+}
+let savedScrollY=0;
+function setRecordingScreen(on,staleSec=null){
+  const ov=$('recordOverlay');
+  if(on){savedScrollY=window.scrollY;document.body.style.top=`-${savedScrollY}px`;document.documentElement.classList.add('recording');ov.hidden=false;
+    $('overlayWarn').hidden=staleSec===null;if(staleSec!==null)$('overlayWarn').textContent=`基準が ${(staleSec/60).toFixed(0)}分前のものです。停止して、基準を取り直してください。`;}
+  else if(!ov.hidden){document.documentElement.classList.remove('recording');document.body.style.top='';ov.hidden=true;window.scrollTo(0,savedScrollY);}
+}
+// タッチ・スクロール・ポインターを時刻つきで記録（記録の直前5秒も残す：記録開始のボタン操作を含めるため）
+const INPUT_PRE_MS=5000,preInputs=[];
+function recentInputs(){const t=performance.now();return preInputs.filter(e=>e.t>=t-INPUT_PRE_MS);}
+function logInput(e){
+  const pt=e.touches?.[0]??e.changedTouches?.[0]??e,rec={t:performance.now(),type:e.type,eventTimeStamp:e.timeStamp,x:n(pt.clientX),y:n(pt.clientY),pointerType:e.pointerType??null,touches:e.touches?.length??null,target:e.target?.id||e.target?.tagName||null};
+  if(e.type==='scroll'){rec.scrollY=window.scrollY;rec.x=rec.y=null;}
+  if(state.recording)state.session.inputs.push(rec);else{preInputs.push(rec);while(preInputs.length&&preInputs[0].t<rec.t-INPUT_PRE_MS)preInputs.shift();}
+}
+for(const t of ['touchstart','touchend','touchcancel','pointerdown','pointerup','pointercancel'])document.addEventListener(t,logInput,{capture:true,passive:true});
+window.addEventListener('scroll',logInput,{passive:true});
+document.addEventListener('touchmove',e=>{if(state.recording)e.preventDefault();},{passive:false});
+setInterval(()=>{if(state.recording&&state.session)$('overlayTime').textContent=`${((performance.now()-state.session.meta.start)/1000).toFixed(0)}秒`;},500);
 function updateRecording(){
   if(!state.session)return;
   const seconds=((state.session.meta.end??performance.now())-state.session.meta.start)/1000;
@@ -680,8 +747,8 @@ db().then(d=>new Promise((resolve,reject)=>{
   const r=d.transaction('archives').objectStore('archives').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
 })).then(items=>{for(const item of items)if(!state.archives.has(item.id))state.archives.set(item.id,item.session);refreshSessionSelect();}).catch(()=>{});
 function recoveredSession(){
-  const result={meta:{...recovery[0].meta,recovered:true},frames:[],motion:[],orientation:[],events:[]};
-  for(const c of recovery.slice(1))for(const k of ['frames','motion','orientation','events'])result[k].push(...(c[k]||[]));
+  const result={meta:{...recovery[0].meta,recovered:true},frames:[],motion:[],orientation:[],events:[],inputs:[]};
+  for(const c of recovery.slice(1))for(const k of ['frames','motion','orientation','events','inputs'])result[k].push(...(c[k]||[]));
   return result;
 }
 $('recover').addEventListener('click',()=>{
