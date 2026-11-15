@@ -3,7 +3,7 @@ import {READING_VERSION,READING_PAGES} from './reading.js';
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
-const APP_VERSION='0.3.0';
+const APP_VERSION='0.3.1';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
@@ -29,7 +29,11 @@ const IMU={maxAgeMs:250,gravityLowPass:.2};   // 重力成分は指数平滑（6
 const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 
 // ---- セットアップとカメラ校正（0.2.0）
-const SETUP={irisMm:11.7,tiltTolDeg:1,heightTolCm:1,distanceTolCm:1,stableMs:1000}; // 高さ・距離の案内は虹彩の実寸を11.7 mmと仮定
+// 0.3.1：厳しすぎて3つを同時に満たせなかったため緩めた（0.2.x は ±1°・±1 cm・±1 cm）。高さと距離は被験者の呼吸や頭の小さな動きでも変わり、
+// 虹彩の実寸の仮定（11.7 mm）だけで距離に ±2 cm 程度の誤差があるので、±1 cm は測れる精度より細かかった。
+// 表示は直近 smoothMs の中央値。一度緑になった項目は、許容の releaseFactor 倍を超えるまで緑のまま（ちらつき防止）。
+// セットアップは目安で、合格しなくても基準は記録できる（実際の値は meta.setup に残る）
+const SETUP={irisMm:11.7,tiltTolDeg:2,heightTolCm:2,distanceTolCm:3,releaseFactor:1.5,smoothMs:1000,stableMs:1000};
 const CAMERA_CALIB_KEY='posture-lab.cameraCalibration.v1';
 let audio=null;
 function beep(freq=880,ms=120,gain=.25){try{audio??=new (window.AudioContext||window.webkitAudioContext)();const o=audio.createOscillator(),g=audio.createGain();o.frequency.value=freq;o.connect(g);g.connect(audio.destination);g.gain.setValueAtTime(gain,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+ms/1000);o.start();o.stop(audio.currentTime+ms/1000);}catch{/* 音は任意 */}}
@@ -310,19 +314,25 @@ function updateSetup(row,iris){
   ctx.save();ctx.strokeStyle='#ffd34d';ctx.lineWidth=Math.max(2,w/240);ctx.setLineDash([w/40,w/60]);ctx.beginPath();ctx.moveTo(0,h/2);ctx.lineTo(w,h/2);ctx.stroke();ctx.setLineDash([]);
   if(iris){ctx.fillStyle='#ffd34d';ctx.beginPath();ctx.arc(iris.center[0]*w,iris.center[1]*h,Math.max(4,w/90),0,2*Math.PI);ctx.fill();}
   ctx.restore();
-  const t=row.deviceTiltLRDeg,fbk=row.deviceTiltFBDeg,res={};
+  // 直近 smoothMs の中央値で判定・表示する
+  const now0=performance.now();state.setupBuf=(state.setupBuf||[]).filter(x=>x.t>=now0-SETUP.smoothMs);
+  state.setupBuf.push({t:now0,lr:row.deviceTiltLRDeg,fb:row.deviceTiltFBDeg,dy:iris&&iris.p>0&&row.eyeOffsetYPx!==null?row.eyeOffsetYPx*SETUP.irisMm/iris.p/10:null,z:iris&&iris.p>0?row.zFocalCm:null});
+  const sm=k=>{const v=state.setupBuf.map(x=>x[k]).filter(x=>x!==null&&Number.isFinite(x));return v.length?median(v):null;};
+  const latch=state.setupLatch??={tilt:false,height:false,distance:false};
+  const within=(key,v,tol)=>{const ok=Math.abs(v)<=tol*(latch[key]?SETUP.releaseFactor:1);latch[key]=ok;return ok;};
+  const t=row.deviceTiltLRDeg===null?null:sm('lr'),fbk=row.deviceTiltFBDeg===null?null:sm('fb'),res={};
   if(t===null){setItem('setupTilt','ng','—','IMUの方向を受信していません');res.tilt=false;}
   else{
-    res.tilt=Math.abs(t)<=SETUP.tiltTolDeg&&Math.abs(fbk)<=SETUP.tiltTolDeg;
+    res.tilt=within('tilt',Math.max(Math.abs(t),Math.abs(fbk)),SETUP.tiltTolDeg);
     const words=[Math.abs(t)>SETUP.tiltTolDeg?`上端が${t>0?'左':'右'}に${Math.abs(t).toFixed(1)}°`:'',Math.abs(fbk)>SETUP.tiltTolDeg?`上端が${fbk>0?'奥へ':'手前へ'}${Math.abs(fbk).toFixed(1)}°`:''].filter(Boolean).join('、');
     setItem('setupTilt',stand?(res.tilt?'ok':'ng'):'info',`左右 ${t.toFixed(1)}° 前後 ${fbk.toFixed(1)}°`,res.tilt?'垂直です':`${words}傾いています`);
   }
-  if(!iris||!(iris.p>0)){setItem('setupHeight','ng','—','両目が見えません');setItem('setupDistance','ng','—','両目が見えません');res.height=res.distance=false;}
+  if(!iris||!(iris.p>0)||sm('dy')===null){setItem('setupHeight','ng','—','両目が見えません');setItem('setupDistance','ng','—','両目が見えません');res.height=res.distance=false;latch.height=latch.distance=false;}
   else{
     // 目が横線より下に写る＝カメラが目より高い → スタンドを下げる
-    const dyCm=row.eyeOffsetYPx*SETUP.irisMm/iris.p/10;res.height=Math.abs(dyCm)<=SETUP.heightTolCm;
+    const dyCm=sm('dy');res.height=within('height',dyCm,SETUP.heightTolCm);
     setItem('setupHeight',stand?(res.height?'ok':'ng'):'info',`${dyCm>=0?'+':''}${dyCm.toFixed(1)} cm`,res.height?'目の高さです':`スタンドを あと ${Math.abs(dyCm).toFixed(1)} cm ${dyCm>0?'下げる':'上げる'}`);
-    const z=row.zFocalCm,dz=z-target;res.distance=Math.abs(dz)<=SETUP.distanceTolCm;
+    const z=sm('z'),dz=z-target;res.distance=within('distance',dz,SETUP.distanceTolCm);
     setItem('setupDistance',stand?(res.distance?'ok':'ng'):'info',`${z.toFixed(1)} cm`,res.distance?`目標 ${target} cm です`:`あと ${Math.abs(dz).toFixed(1)} cm ${dz>0?'近づく':'離れる'}${row.focalSource==='charuco'?'':'（f 未校正）'}`);
     res.heightCm=dyCm;res.distanceCm=z;
   }
@@ -333,7 +343,7 @@ function updateSetup(row,iris){
   state.setupPassed=passed;
   state.setupLive={mode:stand?'stand':'hand',targetCm:target,tiltLRDeg:t,tiltFBDeg:fbk,heightOffsetCm:res.heightCm??null,distanceCm:res.distanceCm??null,
     tiltOK:!!res.tilt,heightOK:!!res.height,distanceOK:!!res.distance,passed,focalPx:row.focalPx,focalSource:row.focalSource,irisMmAssumed:SETUP.irisMm};
-  $('setupStatus').textContent=!stand?'手持ち：高さと距離は目安です。基準の姿勢で「この姿勢を基準にする」を押してください。':passed?'セットアップ合格。そのまま「この姿勢を基準にする（3秒）」を押してください。':'固定：①傾き → ②高さ → ③距離 の順に合わせてください。3つとも緑になると音が鳴ります。';
+  $('setupStatus').textContent=!stand?'手持ち：高さと距離は目安です。基準の姿勢で「この姿勢を基準にする」を押してください。':passed?'セットアップ合格。そのまま「この姿勢を基準にする（3秒）」を押してください。':`固定：①傾き → ②高さ → ③距離 の順に合わせてください（目安：傾き±${SETUP.tiltTolDeg}°、高さ±${SETUP.heightTolCm} cm、距離±${SETUP.distanceTolCm} cm）。3つとも緑になると音が鳴ります。緑にならなくても基準は記録できます（実際の値は記録に残ります）。`;
   if(!state.recording&&!state.collect){
     const b=$('previewBadge');b.hidden=false;
     const mark=(ok,txt)=>stand?`<span class="${ok?'ok':'ng'}">${ok?'✓':'×'} ${txt}</span>`:txt;

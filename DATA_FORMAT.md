@@ -1,6 +1,12 @@
-# posture-lab の記録の形式（0.3.0）
+# posture-lab の記録の形式（0.3.1）
 
-対象：posture-lab 0.3.0（2026-11-15）。旧形式は 0.2.1、0.2.0（dual_test3）と 0.1.1（dual_test1・2）。
+対象：posture-lab 0.3.1（2026-11-15）。旧形式は 0.3.0、0.2.1、0.2.0（dual_test3）と 0.1.1（dual_test1・2）。
+
+## 0.3.1 で変わったもの
+
+- `meta.setup.tolerances`（＝`SETUP`）の値が変わり、キーが増えた：`tiltTolDeg: 2`、`heightTolCm: 2`、`distanceTolCm: 3`（0.3.0 までは 1・1・1）、`releaseFactor: 1.5`、`smoothMs: 1000`
+- `meta.setup.passedAtStart` は、この緩めた許容で判定した結果。傾き・高さ・距離の実際の値（`tiltLRDeg` など）は今までどおり基準の3秒間の中央値なので、解析ではこちらで判断する
+- 列とイベントは変わっていない
 
 ## 0.3.0 で増えたもの
 

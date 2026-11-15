@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#102c36">
   <title>姿勢ラボ — 実験用プロトタイプ</title>
-  <link rel="stylesheet" href="styles.css?v=0.3.0">
+  <link rel="stylesheet" href="styles.css?v=0.3.1">
 </head>
 <body>
 <main>
-  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.3.0</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
+  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.3.1</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
   <p class="intro">前面カメラと端末の動きから、基準姿勢からの変化を記録します。縦持ち・着座で使用してください。</p>
   <section class="card setup">
     <h2>1 <span>カメラとセンサーを開始</span></h2>
@@ -38,9 +38,9 @@
         <label>目標の距離（cm）<input id="targetDistance" type="number" inputmode="decimal" min="20" max="80" step="0.5" value="40"></label>
       </div>
       <div class="setup-grid" id="setupGrid">
-        <div class="setup-item" id="setupTilt"><span>① 傾き（垂直 ±1°）</span><b>—</b><small>—</small></div>
-        <div class="setup-item" id="setupHeight"><span>② 高さ（目が横線の上 ±1 cm）</span><b>—</b><small>—</small></div>
-        <div class="setup-item" id="setupDistance"><span>③ 距離（目標 ±1 cm）</span><b>—</b><small>—</small></div>
+        <div class="setup-item" id="setupTilt"><span>① 傾き（垂直 ±2°）</span><b>—</b><small>—</small></div>
+        <div class="setup-item" id="setupHeight"><span>② 高さ（目が横線の上 ±2 cm）</span><b>—</b><small>—</small></div>
+        <div class="setup-item" id="setupDistance"><span>③ 距離（目標 ±3 cm）</span><b>—</b><small>—</small></div>
       </div>
       <p id="setupStatus" class="note" aria-live="polite">カメラを開始すると、傾き → 高さ → 距離の順に案内します。</p>
       <h3 class="sub">基準姿勢を記録</h3>
@@ -104,6 +104,6 @@
     <button id="overlayStop" class="rec-stop">記録停止<small>2秒長押し</small></button>
   </div>
 </div>
-<script type="module" src="app.js?v=0.3.0"></script>
+<script type="module" src="app.js?v=0.3.1"></script>
 </body>
 </html>
