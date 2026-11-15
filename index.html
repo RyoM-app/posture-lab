@@ -2,14 +2,14 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#102c36">
   <title>姿勢ラボ — 実験用プロトタイプ</title>
-  <link rel="stylesheet" href="styles.css?v=0.2.1">
+  <link rel="stylesheet" href="styles.css?v=0.3.0">
 </head>
 <body>
 <main>
-  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.2.1</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
+  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.3.0</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
   <p class="intro">前面カメラと端末の動きから、基準姿勢からの変化を記録します。縦持ち・着座で使用してください。</p>
   <section class="card setup">
     <h2>1 <span>カメラとセンサーを開始</span></h2>
@@ -74,7 +74,7 @@
       </div>
       <p class="note">前回の値を覚えています。2回目以降は条件と回番号だけ変えてください。条件を選ぶと「持ち方」も合わせて切り替わります。ファイル名は <code>P01_fixed1_posture_時刻</code> の形になります。</p>
     </div>
-    <div class="actions"><button id="record" class="primary" disabled>記録開始</button><button id="endRecord" disabled>記録停止（長押し1秒）</button><button id="exportCsv" disabled>計測CSVを保存</button><button id="exportJson" disabled>全記録JSONを保存</button><button id="recover" hidden>前回の中断記録を保存</button></div>
+    <div class="actions"><button id="record" class="primary" disabled>記録開始</button><button id="endRecord" disabled>記録停止（長押し2秒）</button><button id="exportCsv" disabled>計測CSVを保存</button><button id="exportJson" disabled>全記録JSONを保存</button><button id="recover" hidden>前回の中断記録を保存</button></div>
     <div id="nextRecordPanel" class="notice" role="group" aria-label="次の記録を開始" hidden>
       <p id="nextRecordNote"></p>
       <p>前の記録を端末内に退避してから次の計測を始めます。退避できない場合は開始せず、現在の記録を保持します。</p>
@@ -93,12 +93,17 @@
   </details>
   <footer>姿勢ラボ / 教授説明・実機確認用の試作。角度・距離・軸の対応は未検証です。<br>MediaPipeを使用。<a href="https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE" target="_blank" rel="noopener">ライセンス</a></footer>
 </main>
-<div id="recordOverlay" class="record-overlay" hidden role="dialog" aria-label="記録中">
-  <p class="rec-dot">● 記録中 <span id="overlayTime">0秒</span></p>
-  <p class="rec-big">画面に触れないでください</p>
-  <p id="overlayWarn" class="rec-warn" hidden></p>
-  <button id="overlayStop" class="rec-stop">記録停止<small>1秒長押し</small></button>
+<div id="recordOverlay" class="record-overlay" hidden role="dialog" aria-label="計測中">
+  <div class="rec-reading"><p id="readingText"></p><span id="readingPage"></span></div>
+  <div id="fixation" class="fixation" aria-hidden="true"></div>
+  <div class="rec-bottom">
+    <p id="overlayWarn" class="rec-warn" hidden></p>
+    <p class="rec-big">音声案内に従ってください</p>
+    <p class="rec-big">画面に触れないでください</p>
+    <p class="rec-dot">● 記録中 <span id="overlayTime">0秒</span></p>
+    <button id="overlayStop" class="rec-stop">記録停止<small>2秒長押し</small></button>
+  </div>
 </div>
-<script type="module" src="app.js?v=0.2.1"></script>
+<script type="module" src="app.js?v=0.3.0"></script>
 </body>
 </html>

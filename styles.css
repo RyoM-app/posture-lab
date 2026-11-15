@@ -7,16 +7,23 @@ select{font:inherit;font-size:16px;min-height:44px;padding:8px 10px;border:1px s
 .subject{border:1px solid #e0e9ec;border-radius:12px;padding:10px 12px;margin:10px 0}.subject label.wide{flex:1 1 200px}.subject label.wide input{width:100%}.subject input,.subject select{width:auto;min-width:110px}
 .quality{margin:10px 0;border-radius:12px;padding:12px 14px;font-size:14px;line-height:1.5}.quality strong{display:block;font-size:28px}.quality.ok{background:#e3f6ef;color:#0f5c4a;border:2px solid #49b892}.quality.ng{background:#fff0e4;color:#8a3d12;border:2px solid #e28a4d}.quality ul{margin:6px 0;padding-left:20px}.quality dl{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:8px 0 0;font-size:12px}.quality dt{color:#536d76}.quality dd{margin:0;font-variant-numeric:tabular-nums}#qualityBox[hidden]{display:none}
 
-/* 0.2.1：記録中の画面。スクロールを止め、触れないよう表示。停止は長押し */
-html.recording,html.recording body{overflow:hidden;touch-action:none;overscroll-behavior:none}
+/* 0.3.0：記録中の計測画面。全画面で、停止ボタン（2秒長押し）以外は操作できない。上〜中ほどに文章、中央に見る位置の目印 */
+html.recording,html.recording body{overflow:hidden;touch-action:none;overscroll-behavior:none;-webkit-user-select:none;user-select:none}
 html.recording body{position:fixed;left:0;right:0;width:100%}
-.record-overlay{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px 20px calc(24px + env(safe-area-inset-bottom));background:#102c36;color:#fff;text-align:center;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.record-overlay{position:fixed;inset:0;z-index:50;background:#102c36;color:#fff;text-align:center;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;overflow:hidden}
 .record-overlay[hidden]{display:none}
-.rec-dot{font-size:16px;color:#ff8f7a;margin:0}.rec-big{font-size:clamp(22px,6.6vw,44px);font-weight:800;line-height:1.35;margin:0}
-.rec-warn{font-size:15px;background:#c56542;padding:10px 14px;border-radius:10px;margin:0}
-.rec-stop{margin-top:30px;min-width:220px;min-height:72px;font-size:18px;background:#f4f8f9;color:#16323c;display:flex;flex-direction:column;align-items:center;touch-action:none;-webkit-touch-callout:none;position:relative;overflow:hidden}
-.rec-stop small{font-size:12px;font-weight:500;color:#61767d}
+.rec-reading{position:absolute;left:0;right:0;top:calc(14vh + env(safe-area-inset-top));padding:0 22px;text-align:left}
+.rec-reading p{margin:0 auto;max-width:34em;font-size:clamp(18px,5.3vw,24px);line-height:1.95;color:#f2f6f7;letter-spacing:.02em}
+.rec-reading span{display:block;margin-top:6px;font-size:11px;color:#7f99a2;text-align:right;max-width:34em;margin-left:auto;margin-right:auto}
+.fixation{position:absolute;left:50%;top:50%;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;background:#7fd3c4}
+.fixation.lost{background:#e2a04b;box-shadow:0 0 0 4px #e2a04b33}
+.rec-bottom{position:absolute;left:0;right:0;bottom:calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 20px}
+.rec-big{font-size:clamp(17px,5.2vw,26px);font-weight:800;line-height:1.35;margin:0}
+.rec-dot{font-size:13px;color:#ff8f7a;margin:4px 0 0}
+.rec-warn{font-size:14px;background:#c56542;padding:8px 12px;border-radius:10px;margin:0 0 4px}
+.rec-stop{margin-top:6px;min-width:200px;min-height:60px;font-size:16px;background:#f4f8f9;color:#16323c;display:flex;flex-direction:column;align-items:center;justify-content:center;touch-action:none;-webkit-touch-callout:none;position:relative;overflow:hidden}
+.rec-stop small{font-size:11px;font-weight:500;color:#61767d}
 .rec-stop::after,#endRecord::after{content:"";position:absolute;left:0;bottom:0;height:5px;width:0;background:#c56542}
 #endRecord{position:relative;overflow:hidden}
-.rec-stop.holding::after,#endRecord.holding::after{width:100%;transition:width 1s linear}
+.rec-stop.holding::after,#endRecord.holding::after{width:100%;transition:width 2s linear}
 .quality.warn{background:#fff7e3;color:#735715;border:2px solid #d5bb80}

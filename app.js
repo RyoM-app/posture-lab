@@ -1,8 +1,9 @@
 import {rad,deg,clamp,median,sd,mean,faceRotation,headInclination,headInclinationFromUp,measureIris,upFromOrientation,upFromGravity,IRIS_POINTS} from './geometry.js';
+import {READING_VERSION,READING_PAGES} from './reading.js';
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
-const APP_VERSION='0.2.1';
+const APP_VERSION='0.3.0';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
@@ -19,7 +20,9 @@ const state={running:false,starting:false,stream:null,worker:null,detector:null,
 // 0.2.1：h の割合と途切れは「顔が写っているのに h が出ない」フレームだけで判定する（顔が写っていない時間は別に表示）。
 //        スタンドの動きは記録開始時の1秒間の上向きと比べ、2°を超えたら。基準が5分以上前なら取り直すよう表示する
 const QUALITY={windowSec:5,windowStepSec:.5,minWindowRate:.7,maxHGapSec:2,imuGapMs:250,standMoveDeg:2,standReturnDeg:1,standRefMs:1000,
-  baselineMaxAgeSec:300,noFaceMinSec:.5,touchNearMs:300,stopHoldMs:1000};
+  baselineMaxAgeSec:300,noFaceMinSec:.5,touchNearMs:300,stopHoldMs:2000};   // 0.3.0：停止の長押しは2秒
+// 0.3.0：記録中の計測画面に表示する文章のページ送り（秒）。CVAカメラの「読書」区間（120秒）用だが、区間は分からないので記録中ずっと表示する
+const READING={pageSec:18};
 const IRIS_OCCLUDED_OPEN=.15;   // eyeOpenMin がこれ未満なら、まぶたが虹彩を隠している（zFocalCm が大きく出る）として irisOccluded = true
 // IMU：方向（deviceorientation）が古いときは、加速度（devicemotion）の重力成分から上向きを求める予備の経路を使う
 const IMU={maxAgeMs:250,gravityLowPass:.2};   // 重力成分は指数平滑（60 Hzで約80 ms）して手の動きを抑える
@@ -570,6 +573,7 @@ function beginSession(){
   const bAge=(state.session.meta.start-state.baseline.t)/1000;state.session.meta.baselineAgeSec=bAge;
   state.recording=true;state.dirty=true;event('record_start',{baselineAgeSec:bAge});lockSettings(true);wake();   // 記録中は画面を消さない
   if(bAge>=QUALITY.baselineMaxAgeSec){event('baseline_stale',{baselineAgeSec:bAge});status(`基準（「この姿勢を基準にする」）が ${(bAge/60).toFixed(0)}分前のものです。この回を止めて、基準を取り直してから記録してください。`,true);}
+  state.session.meta.reading={version:READING_VERSION,pageSec:READING.pageSec,pages:READING_PAGES.length,text:READING_PAGES};
   setRecordingScreen(true,bAge>=QUALITY.baselineMaxAgeSec?bAge:null);
   $('record').disabled=true;$('endRecord').disabled=false;
   $('exportCsv').disabled=true;$('exportJson').disabled=true;
@@ -661,7 +665,11 @@ function longPress(el,fn){
 let savedScrollY=0;
 function setRecordingScreen(on,staleSec=null){
   const ov=$('recordOverlay');
+  clearInterval(state.readingTimer);
   if(on){savedScrollY=window.scrollY;document.body.style.top=`-${savedScrollY}px`;document.documentElement.classList.add('recording');ov.hidden=false;
+    let k=0;const show=()=>{const page=k%READING_PAGES.length;$('readingText').textContent=READING_PAGES[page];$('readingPage').textContent=`${page+1} / ${READING_PAGES.length}`;
+      event('reading_page',{page,loop:Math.floor(k/READING_PAGES.length),wallMs:Date.now()});k++;};
+    show();state.readingTimer=setInterval(()=>{if(state.recording)show();},READING.pageSec*1000);
     $('overlayWarn').hidden=staleSec===null;if(staleSec!==null)$('overlayWarn').textContent=`基準が ${(staleSec/60).toFixed(0)}分前のものです。停止して、基準を取り直してください。`;}
   else if(!ov.hidden){document.documentElement.classList.remove('recording');document.body.style.top='';ov.hidden=true;window.scrollTo(0,savedScrollY);}
 }
@@ -676,7 +684,12 @@ function logInput(e){
 for(const t of ['touchstart','touchend','touchcancel','pointerdown','pointerup','pointercancel'])document.addEventListener(t,logInput,{capture:true,passive:true});
 window.addEventListener('scroll',logInput,{passive:true});
 document.addEventListener('touchmove',e=>{if(state.recording)e.preventDefault();},{passive:false});
-setInterval(()=>{if(state.recording&&state.session)$('overlayTime').textContent=`${((performance.now()-state.session.meta.start)/1000).toFixed(0)}秒`;},500);
+// 計測画面：経過時間と、顔が検出されているか（見る位置の目印の色で、実験者に控えめに知らせる）
+setInterval(()=>{if(!state.recording||!state.session)return;const now=performance.now();
+  $('overlayTime').textContent=`${((now-state.session.meta.start)/1000).toFixed(0)}秒`;
+  const face=!!state.latest&&state.latest.faceDetected&&now-state.latest.processedAt<700;$('fixation').classList.toggle('lost',!face);},200);
+// 記録中はズーム（ピンチ・ダブルタップ）と選択を止める（iOS Safari は viewport の指定だけでは止まらない）
+for(const t of ['gesturestart','gesturechange','gestureend','dblclick','selectstart','contextmenu'])document.addEventListener(t,e=>{if(state.recording)e.preventDefault();},{passive:false});
 function updateRecording(){
   if(!state.session)return;
   const seconds=((state.session.meta.end??performance.now())-state.session.meta.start)/1000;
