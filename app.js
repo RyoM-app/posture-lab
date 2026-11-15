@@ -3,7 +3,7 @@ import {READING_VERSION,READING_PAGES} from './reading.js';
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
-const APP_VERSION='0.3.1';
+const APP_VERSION='0.3.2';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;

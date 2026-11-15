@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#102c36">
   <title>姿勢ラボ — 実験用プロトタイプ</title>
-  <link rel="stylesheet" href="styles.css?v=0.3.1">
+  <link rel="stylesheet" href="styles.css?v=0.3.2">
 </head>
 <body>
 <main>
-  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.3.1</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
+  <header><div><span class="eyebrow">SMARTPHONE POSTURE LAB · 0.3.2</span><h1>姿勢の変化を見る</h1></div><span class="badge">実験用・未検証</span></header>
   <p class="intro">前面カメラと端末の動きから、基準姿勢からの変化を記録します。縦持ち・着座で使用してください。</p>
   <section class="card setup">
     <h2>1 <span>カメラとセンサーを開始</span></h2>
@@ -20,8 +20,8 @@
   </section>
   <details class="card" id="calibCard" open>
     <summary><h2>2 <span>カメラ校正 <small>iPhone 1台につき1回</small></span></h2></summary>
-    <p>内カメラの焦点距離 f（画素）を、ChArUco ボード（4列×5行、DICT_4X4_50、白黒反転）で求めます。スマホをスタンドに縦向きで立て、カメラを開始してから「校正を始める」を押し、ボードを前で20〜30秒ゆっくり動かしてください（30〜50 cm、向きと位置を変えながら、少し斜めに）。条件を満たすフレームを自動で15枚集め（採用のたびに音が鳴ります）、計算します。再投影誤差が1 px未満で合格です。計算は端末の中だけで行います。</p>
-    <div class="input-row"><label>マスの実寸（mm）<input id="squareMm" type="number" inputmode="decimal" min="10" max="100" step="0.1" value="46.0"></label><button id="calibStart" class="primary" disabled>校正を始める</button><button id="calibCancel" disabled>中止</button></div>
+    <p>内カメラの焦点距離 f（画素）を、ChArUco ボード（<code>charuco_A4_4x5_4.8cm.pdf</code>：4列×5行、DICT_4X4_50、白黒反転なし、マス48 mm）で求めます。印刷したら、4マス分を定規で測って4で割った値を入れてください（以前の白黒反転したボードも使えます）。スマホをスタンドに縦向きで立て、カメラを開始してから「校正を始める」を押し、ボードを前で20〜30秒ゆっくり動かしてください（30〜50 cm、向きと位置を変えながら、少し斜めに）。条件を満たすフレームを自動で15枚集め（採用のたびに音が鳴ります）、計算します。再投影誤差が1 px未満で合格です。計算は端末の中だけで行います。</p>
+    <div class="input-row"><label>マスの実寸（mm）<input id="squareMm" type="number" inputmode="decimal" min="10" max="100" step="0.1" value="48.0"></label><button id="calibStart" class="primary" disabled>校正を始める</button><button id="calibCancel" disabled>中止</button></div>
     <div class="actions"><button id="calibExport" disabled>校正結果をJSONで保存</button><button id="calibClear" disabled>校正を消去</button></div>
     <p id="calibStatus" class="note" aria-live="polite">未校正です。校正するまでは、仮の画角から求めた f を使います。</p>
     <p class="note">マスの実寸は f には影響しません（記録のため、4マス分を定規で測って4で割った値を入れてください）。計測と同じ解像度・縦向きで校正します。解像度が変わったら校正し直してください。初回は OpenCV.js（約10 MB）を読み込みます。</p>
@@ -104,6 +104,6 @@
     <button id="overlayStop" class="rec-stop">記録停止<small>2秒長押し</small></button>
   </div>
 </div>
-<script type="module" src="app.js?v=0.3.1"></script>
+<script type="module" src="app.js?v=0.3.2"></script>
 </body>
 </html>

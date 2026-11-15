@@ -5,7 +5,9 @@ import { estimateFocal, viewPose, rotationAngleDeg } from './calib-math.js';
 export const OPENCV_VERSION = '4.12.0-release.1';
 export const OPENCV_URL = `https://cdn.jsdelivr.net/npm/@techstark/opencv-js@${OPENCV_VERSION}/dist/opencv.js`;
 // ~/Blender/mocap/scripts/cloud_calib/calib.py と同じ指定（charuco.toml：legacy_pattern = false）
-export const BOARD = { columns: 4, rows: 5, dictionary: 'DICT_4X4_50', markerScale: 0.8, inverted: true, legacyPattern: false };
+// 0.3.2：ボードを作り直した（charuco_A4_4x5_4.8cm.pdf：白黒反転なし、マス48 mm＝4マスで192 mm）。inverted は印刷したボードの記録用
+export const BOARD = { columns: 4, rows: 5, dictionary: 'DICT_4X4_50', markerScale: 0.8, inverted: false, legacyPattern: false };
+export const DEFAULT_SQUARE_MM = 48;
 export const CALIB_RULES = {
   targetFrames: 15,        // この枚数を集めたら計算する
   minCorners: 8,           // 採用するフレームに必要な角の数（12個中）
@@ -51,7 +53,7 @@ export class CharucoCalibrator {
     this.board = new cv.aruco_CharucoBoard(new cv.Size(BOARD.columns, BOARD.rows), this.squareMm, this.squareMm * BOARD.markerScale, this.dict, new cv.Mat());
     this.board.setLegacyPattern(legacy);
     const dp = new cv.aruco_DetectorParameters();
-    dp.detectInvertedMarker = BOARD.inverted;   // 白黒反転のボード
+    dp.detectInvertedMarker = true;   // 通常のマーカーを探し、見つからなければ白黒反転も試す（新しいボードも、以前の反転したボードも使える）
     this.detector = new cv.aruco_CharucoDetector(this.board, new cv.aruco_CharucoParameters(), dp, new cv.aruco_RefineParameters(10, 3, true));
     // 角の番号 → ボード上の座標（mm）。OpenCV.js の Point3f は z を返さないので 0 にする（平面）
     const chess = this.board.getChessboardCorners();
