@@ -1,6 +1,13 @@
-# posture-lab の記録の形式（0.3.2）
+# posture-lab の記録の形式（0.4.0）
 
 対象：posture-lab 0.3.2（2026-11-15）。旧形式は 0.3.1、0.3.0、0.2.1、0.2.0（dual_test3）と 0.1.1（dual_test1・2）。
+
+## 0.4.0 で増えたもの
+
+| どこ | キー | 中身 |
+|---|---|---|
+| `meta` | `protocolVersion` | 進行表の版 `"P-20261119"`（CVAカメラの `meta.protocol.protocolVersion` と同じ） |
+| `meta` | `timetable` | 進行表から計算した区間の一覧（CVAカメラの `meta.protocol.timetable` と同じ形。同じ `protocol.js` から作る） |
 
 ## 0.3.2 で変わったもの
 

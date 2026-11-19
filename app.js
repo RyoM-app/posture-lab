@@ -1,9 +1,11 @@
 import {rad,deg,clamp,median,sd,mean,faceRotation,headInclination,headInclinationFromUp,measureIris,upFromOrientation,upFromGravity,IRIS_POINTS} from './geometry.js';
 import {READING_VERSION,READING_PAGES} from './reading.js';
+import './protocol.js';   // 進行表（CVAカメラと同じファイル）。window.POSTURE_PROTOCOL
+const PP=window.POSTURE_PROTOCOL;
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
-const APP_VERSION='0.3.2';
+const APP_VERSION='0.4.0';
 const MODEL='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const BASE=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const n=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
@@ -576,6 +578,7 @@ function beginSession(){
   const id=checkSubject(subject)?`posture-${stamp}`:`${subject.id}_${subject.condition}${subject.run}_posture_${stamp}`;
   const clock={dateNowMs:Date.now(),perfNowMs:performance.now(),timeOrigin:performance.timeOrigin,note:'記録開始時の Date.now() と performance.now() の組。2台の時計のずれを後で見積もるため'};
   state.session={meta:{id,version:APP_VERSION,subject,clock,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
+    protocolVersion:PP.PROTOCOL_VERSION,timetable:PP.buildSchedule($('holdMode').value==='hand'?'dual':'stand'),
     holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[],inputs:recentInputs()};
