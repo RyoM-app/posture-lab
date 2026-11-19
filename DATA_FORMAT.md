@@ -22,6 +22,11 @@
 | `meta` | `reading` | **0.4.0 で変わった**：`{version: 'texts-20261119', textId, textIndex, title, rule, pageSec: 10, pages: 6, text: [...], shownDuring: '読書 hold'}`。進行表のときだけ（なしでは文章を出さないので、キーなし） |
 | `events` | `reading_page` | **読書の区間だけ**：`page`（0〜5）・`textId`・`plannedSec`（表の時刻）・`sec`・`wallMs`。0.3.x は記録中ずっと18秒ごと（`loop` つき）だった |
 | `events` | `reading_end` | 読書の区間が終わり、文章を消した |
+| `frames` | `irisOccluded` | **0.4.0 で判定が変わった**：`eyeOpenRatio` < 0.6（基準の値がないときは `eyeOpenMin` < 0.15）。0.2.1〜0.3.x は `eyeOpenMin` < 0.15 |
+| `frames` | `eyeOpenRatio` | `eyeOpenMin` ÷ `meta.baseline.eyeOpenMinMedian` |
+| `frames` | `irisOccludedFixed` | 今までの判定（`eyeOpenMin` < 0.15）。比べる用 |
+| `meta` | `irisOcclusion` | `{method: 'ratio-to-baseline' / 'fixed', ratio: 0.6, baselineEyeOpenMin, fixedThreshold: 0.15}` |
+| `meta.baseline` | `eyeOpenMinMedian` | 基準の3秒間の `eyeOpenMin` の中央値 |
 
 **2台の時刻合わせ**：音の合図なら、posture-lab の `meta.sync.t0` と CVAカメラの `sync_tone_start` が同じ瞬間（音が空気を伝わる時間と、出力・入力の遅れの数十 ms を除く）。手動のときは数秒ずれうるので、うなずきと相互相関で合わせる。
 

@@ -28,7 +28,14 @@ const QUALITY={windowSec:5,windowStepSec:.5,minWindowRate:.7,maxHGapSec:2,imuGap
   baselineMaxAgeSec:300,noFaceMinSec:.5,touchNearMs:300,stopHoldMs:2000};   // 0.3.0：停止の長押しは2秒
 // 0.3.0：記録中の計測画面に表示する文章のページ送り（秒）。CVAカメラの「読書」区間（120秒）用だが、区間は分からないので記録中ずっと表示する
 const READING={pageSec:18};
-const IRIS_OCCLUDED_OPEN=.15;   // eyeOpenMin がこれ未満なら、まぶたが虹彩を隠している（zFocalCm が大きく出る）として irisOccluded = true
+const IRIS_OCCLUDED_OPEN=.15;   // 0.2.1〜0.3.x：eyeOpenMin がこれ未満なら、まぶたが虹彩を隠している（zFocalCm が大きく出る）として irisOccluded = true
+// 0.4.0：基準を記録したときの eyeOpenMin の中央値に対する比で決める（目の開きには個人差があるため）。基準の値がないときは上の固定のしきい値
+const IRIS_OCCLUSION={ratio:.6,fixedOpen:IRIS_OCCLUDED_OPEN};
+function irisOcclusion(open,ref){
+  if(n(open)===null)return {occluded:null,ratio:null,fixed:null};
+  const ratio=n(ref)!==null&&ref>0?open/ref:null;
+  return {occluded:ratio!==null?ratio<IRIS_OCCLUSION.ratio:open<IRIS_OCCLUSION.fixedOpen,ratio,fixed:open<IRIS_OCCLUSION.fixedOpen};
+}
 // IMU：方向（deviceorientation）が古いときは、加速度（devicemotion）の重力成分から上向きを求める予備の経路を使う
 const IMU={maxAgeMs:250,gravityLowPass:.2};   // 重力成分は指数平滑（60 Hzで約80 ms）して手の動きを抑える
 const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
@@ -250,6 +257,7 @@ function consume(result,p){
   if(!fresh)reasons.push(p.o?'orientation_stale':'orientation_missing');
   if(!mFresh)reasons.push(p.m?'motion_stale':'motion_missing');
   const fc=focal(),tilt=deviceTilt(up);
+  const occ=irisOcclusion(iris?.open,(state.recording?state.session.meta.baseline:state.baseline)?.eyeOpenMinMedian);
   const zf=iris&&iris.p>0?fc.f*SETUP.irisMm/iris.p/10:null;
   const ex=iris?iris.center[0]*canvas.width-canvas.width/2:null,ey=iris?iris.center[1]*canvas.height-canvas.height/2:null;
   const row={t:p.t,processedAt:now,videoTime:p.videoTime,inferenceMs:result.inferenceMs,deliveryMs:now-p.t,
@@ -271,7 +279,7 @@ function consume(result,p){
     gravityLPx:p.m?.gravityLP?.x??null,gravityLPy:p.m?.gravityLP?.y??null,gravityLPz:p.m?.gravityLP?.z??null,
     upX:up?.[0]??null,upY:up?.[1]??null,upZ:up?.[2]??null,standTiltChangeDeg:standChange,standTiltChangeFromStartDeg:standFromStart,invalidReasons:reasons.join('|'),
     irisRightHPx:iris?.rightHV.h??null,irisRightVPx:iris?.rightHV.v??null,irisLeftHPx:iris?.leftHV.h??null,irisLeftVPx:iris?.leftHV.v??null,
-    eyeOpenRight:iris?.openRight??null,eyeOpenLeft:iris?.openLeft??null,eyeOpenMin:iris?.open??null,irisOccluded:n(iris?.open)!==null?iris.open<IRIS_OCCLUDED_OPEN:null,
+    eyeOpenRight:iris?.openRight??null,eyeOpenLeft:iris?.openLeft??null,eyeOpenMin:iris?.open??null,irisOccluded:occ.occluded,eyeOpenRatio:occ.ratio,irisOccludedFixed:occ.fixed,
     eyelidGapRightPx:iris?.eyelidGapPx.right??null,eyelidGapLeftPx:iris?.eyelidGapPx.left??null,
     ...Object.fromEntries(IRIS_POINTS.flatMap(i=>[[`iris${i}X`,iris?.points[i][0]??null],[`iris${i}Y`,iris?.points[i][1]??null]])),
     matrix:pose?.matrix??null,matrixColumnMajor:pose?.columnMajor??null};
@@ -467,7 +475,7 @@ function collectFrame(row){
     const head=heads.length>=Math.max(15,rows.length*.8)?median(heads):null;
     const md=k=>{const v=rows.map(r=>r[k]).filter(x=>x!==null&&x!==undefined);return v.length?median(v):null;};
     const sl=state.setupLive,uv=['upX','upY','upZ'].map(md),un=uv.every(x=>x!==null)?Math.hypot(...uv):0;
-    state.baseline={t:performance.now(),irisPx,head,frames:rows.length,validImuFrames:heads.length,...config(),up:un>0?uv.map(x=>x/un):null,
+    state.baseline={t:performance.now(),irisPx,head,frames:rows.length,validImuFrames:heads.length,...config(),up:un>0?uv.map(x=>x/un):null,eyeOpenMinMedian:md('eyeOpenMin'),
       setup:{mode:$('holdMode').value,targetCm:Number($('targetDistance').value)||40,passedAtStart:!!sl?.passed,tiltLRDeg:md('deviceTiltLRDeg'),tiltFBDeg:md('deviceTiltFBDeg'),
         heightOffsetCm:irisPx>0&&md('eyeOffsetYPx')!==null?md('eyeOffsetYPx')*SETUP.irisMm/irisPx/10:null,distanceCm:md('zFocalCm'),focalPx:md('focalPx'),focalSource:rows.at(-1).focalSource,irisMmAssumed:SETUP.irisMm,tolerances:{...SETUP}}};
     $('baselineStatus').textContent=head===null?'基準取得済み。ただしIMU不足のため距離比のみ。IMU許可後に取り直してください。':`基準取得済み（${rows.length}フレーム）。表示を基準からの変化に切り替えました。`;
@@ -591,6 +599,7 @@ function beginSession(sync=null){
   const id=checkSubject(subject)?`posture-${stamp}`:`${subject.id}_${subject.condition}${subject.run}_posture_${stamp}`;
   const clock={dateNowMs:Date.now(),perfNowMs:performance.now(),timeOrigin:performance.timeOrigin,note:'記録開始時の Date.now() と performance.now() の組。2台の時計のずれを後で見積もるため'};
   state.session={meta:{id,version:APP_VERSION,subject,clock,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
+    irisOcclusion:{method:n(state.baseline?.eyeOpenMinMedian)!==null?'ratio-to-baseline':'fixed',ratio:IRIS_OCCLUSION.ratio,baselineEyeOpenMin:state.baseline?.eyeOpenMinMedian??null,fixedThreshold:IRIS_OCCLUSION.fixedOpen},
     protocolVersion:PP.PROTOCOL_VERSION,protocolKind:sync?.kind??'none',timetable:sync?sync.sch:null,startMethod:sync?.method??'button',
     sync:sync?{method:sync.method,t0:sync.t0,t0WallMs:Date.now()-(performance.now()-sync.t0),detail:sync.detail??null,mic:state.mic?.settings??null}:null,
     holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
@@ -683,6 +692,7 @@ function endRecord(reason='user'){
   const tt=state.timetable;state.timetable=null;
   if(reason==='protocol_end'){const s=state.session;archiveSession(s).then(()=>status('進行表の最後まで進み、自動で停止しました。端末内に保存しました。CSV・JSON は「計測CSVを保存」「全記録JSONを保存」で書き出してください。')).catch(e=>status(`自動で停止しましたが、端末内への保存に失敗しました：${e.message} すぐに CSV・JSON を書き出してください。`,true));}
   if(tt)stopMic();
+  if(tt&&reason!=='protocol_end')status(`進行表の途中で停止しました（${reason==='user'?'長押し':reason}）。端末内に途中まで保存しています。`,reason!=='user');
 }
 longPress($('endRecord'),()=>endRecord());longPress($('overlayStop'),()=>endRecord());
 // ---- 記録中の画面（0.2.1）：スクロールを止め、「画面に触れないでください」を表示。停止は1秒の長押し
