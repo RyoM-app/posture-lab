@@ -19,6 +19,9 @@
 | `events` | `sync_tone_start_heard` | 記録中に開始の音が聞こえた（手動で始めた場合など。時刻合わせの参考） |
 | `events` | `stage` | 区間が変わった：`label`・`stage`・`step`・`index`・`plannedSec`（表の時刻）・`sec`（実際の時刻） |
 | `events` | `mic_start` | マイクの設定（`settings`） |
+| `meta` | `reading` | **0.4.0 で変わった**：`{version: 'texts-20261119', textId, textIndex, title, rule, pageSec: 10, pages: 6, text: [...], shownDuring: '読書 hold'}`。進行表のときだけ（なしでは文章を出さないので、キーなし） |
+| `events` | `reading_page` | **読書の区間だけ**：`page`（0〜5）・`textId`・`plannedSec`（表の時刻）・`sec`・`wallMs`。0.3.x は記録中ずっと18秒ごと（`loop` つき）だった |
+| `events` | `reading_end` | 読書の区間が終わり、文章を消した |
 
 **2台の時刻合わせ**：音の合図なら、posture-lab の `meta.sync.t0` と CVAカメラの `sync_tone_start` が同じ瞬間（音が空気を伝わる時間と、出力・入力の遅れの数十 ms を除く）。手動のときは数秒ずれうるので、うなずきと相互相関で合わせる。
 

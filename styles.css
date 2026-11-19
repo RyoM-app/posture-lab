@@ -44,5 +44,11 @@ html.waiting,html.waiting body{overflow:hidden;overscroll-behavior:none}
 .wait-cancel{background:transparent;color:#b6c9ce;border-color:#4c6a73;min-height:40px;font-size:13px}
 #waitManualStart.holding::after{width:100%;transition:width 2s linear}
 
-/* 0.4.0：進行表のあいだは中央の目印と案内だけ（読書の文章は次の改修で） */
+/* 0.4.0：読書の区間だけ文章を出す（それ以外は中央の目印と案内だけ）。文章の上に、次のページまでの残り時間のバー。ページは横にスライド */
 .record-overlay[data-screen="mark"] .rec-reading{display:none}
+.record-overlay[data-screen="reading"] .rec-guide{display:none}
+.rec-progress{max-width:34em;margin:0 auto 14px;height:4px;border-radius:2px;background:#2c4a55;overflow:hidden}
+.rec-progress i{display:block;height:100%;width:100%;background:#7fd3c4}
+#readingText.slide{animation:pageSlide .45s ease-out}
+@keyframes pageSlide{from{transform:translateX(60%);opacity:0}to{transform:none;opacity:1}}
+.rec-reading{overflow:hidden}

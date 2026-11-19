@@ -109,11 +109,11 @@
   <button id="waitCancel" class="wait-cancel">やめる</button>
 </div>
 <div id="recordOverlay" class="record-overlay" hidden role="dialog" aria-label="計測中">
-  <div class="rec-reading"><p id="readingText"></p><span id="readingPage"></span></div>
+  <div class="rec-reading"><div class="rec-progress"><i id="readingBar"></i></div><p id="readingText"></p><span id="readingPage"></span></div>
   <div id="fixation" class="fixation" aria-hidden="true"></div>
   <div class="rec-bottom">
     <p id="overlayWarn" class="rec-warn" hidden></p>
-    <p class="rec-big">音声案内に従ってください</p>
+    <p class="rec-big rec-guide">音声案内に従ってください</p>
     <p class="rec-big">画面に触れないでください</p>
     <p class="rec-dot">● 記録中 <span id="overlayTime">0秒</span></p>
     <button id="overlayStop" class="rec-stop">記録停止<small>2秒長押し</small></button>

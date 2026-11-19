@@ -1,5 +1,5 @@
 import {rad,deg,clamp,median,sd,mean,faceRotation,headInclination,headInclinationFromUp,measureIris,upFromOrientation,upFromGravity,IRIS_POINTS} from './geometry.js';
-import {READING_VERSION,READING_PAGES} from './reading.js';
+import {READING_VERSION,READING_PAGES,READING_TEXTS_VERSION,chooseReadingText} from './reading.js';
 import './protocol.js';   // 進行表（CVAカメラと同じファイル）。window.POSTURE_PROTOCOL
 import {ToneDetector} from './tone-detect.js';
 const PP=window.POSTURE_PROTOCOL;
@@ -598,7 +598,9 @@ function beginSession(sync=null){
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[],inputs:recentInputs()};
   state.saved={frames:0,motion:0,orientation:0,events:0,inputs:0};state.chunk=1;state.standWatch={moved:false,count:0,max:0,maxAtSec:null,ref:null,acc:[0,0,0],n:0};$('qualityBox').hidden=true;
   const bAge=(state.session.meta.start-state.baseline.t)/1000;state.session.meta.baselineAgeSec=bAge;
-  state.timetable=sync?{sch:sync.sch,t0:sync.t0,method:sync.method,lastKey:null}:null;state.screen='mark';
+  state.timetable=sync?{sch:sync.sch,t0:sync.t0,method:sync.method,lastKey:null,page:null}:null;state.screen='mark';
+  if(sync){const rt=chooseReadingText(subject.id,subject.run);state.timetable.reading=rt;   // 0.4.0：読書の区間だけ表示する文章（被験者・回で選ぶ）
+    state.session.meta.reading={version:READING_TEXTS_VERSION,textId:rt.id,textIndex:rt.index,title:rt.title,rule:rt.rule,pageSec:sync.sch.sec.readingPage,pages:rt.pages.length,text:rt.pages,shownDuring:'読書 hold'};}
   state.recording=true;state.dirty=true;event('record_start',{baselineAgeSec:bAge});
   if(sync)event(sync.method==='tone'?'sync_tone_start':'manual_start',{t:sync.t0,wallMs:state.session.meta.sync.t0WallMs,...(sync.detail??{})});lockSettings(true);wake();   // 記録中は画面を消さない
   if(bAge>=QUALITY.baselineMaxAgeSec){event('baseline_stale',{baselineAgeSec:bAge});status(`基準（「この姿勢を基準にする」）が ${(bAge/60).toFixed(0)}分前のものです。この回を止めて、基準を取り直してから記録してください。`,true);}
@@ -880,6 +882,16 @@ setInterval(()=>{
   if(key!==tt.lastKey){tt.lastKey=key;const g=at.seg;
     event('stage',{label:g?.label??null,stage:g?(g.nod?'nod':at.phase):(at.phase==='lead'?'prep':'done'),step:g?.step??null,index:g?.index??null,plannedSec:g?(at.phase==='hold'?g.holdStart:at.phase==='transition'?g.transStart:g.guideStart):null,sec});
   }
+  // 読書の区間（hold）だけ文章を出す。区間の始まりに1ページ目、pageSec ごとに次のページへ（横にスライド）。文章の上のバーは次のページまでの残り時間
+  const g=at.seg,reading=g&&g.screen==='reading'&&at.phase==='hold';
+  if(reading){
+    const ps=tt.sch.sec.readingPage,el=sec-g.holdStart,rt=tt.reading,page=Math.min(rt.pages.length-1,Math.floor(el/ps));
+    if(state.screen!=='reading')setScreen('reading');
+    if(page!==tt.page){tt.page=page;const t=$('readingText');t.textContent=rt.pages[page];$('readingPage').textContent=`${page+1} / ${rt.pages.length}`;
+      t.classList.remove('slide');void t.offsetWidth;if(page>0)t.classList.add('slide');
+      event('reading_page',{page,textId:rt.id,plannedSec:+(g.holdStart+page*ps).toFixed(3),sec,wallMs:Date.now()});}
+    $('readingBar').style.width=`${Math.max(0,100*(1-(el-page*ps)/ps)).toFixed(1)}%`;
+  }else if(state.screen!=='mark'){setScreen('mark');tt.page=null;$('readingText').textContent='';event('reading_end',{sec});}
   if(sec>=tt.sch.stopAt)endRecord('protocol_end');
 },20);
 window.__pl=state;   // 動作確認用
