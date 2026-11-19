@@ -8,6 +8,19 @@
 |---|---|---|
 | `meta` | `protocolVersion` | 進行表の版 `"P-20261119"`（CVAカメラの `meta.protocol.protocolVersion` と同じ） |
 | `meta` | `timetable` | 進行表から計算した区間の一覧（CVAカメラの `meta.protocol.timetable` と同じ形。同じ `protocol.js` から作る） |
+| `meta` | `protocolKind` | `stand`／`dual`／`none`（進行表なし） |
+| `meta` | `startMethod` | `tone`（音の合図）／`manual`（カウントダウン）／`button`（進行表なし） |
+| `meta` | `sync` | `{method, t0, t0WallMs, detail, mic}`：`t0` は進行表の t = 0（`performance.now()` の基準。音の合図なら聞いた開始の音の鳴り始め、手動ならカウントダウンの 0）、`t0WallMs` はその Unix 時刻、`detail`（検出の情報 `detection {onsetMs, detectedMs, lengths, gaps}`、`countdownSec`、`waitedSec`）、`mic`（マイクの設定） |
+| `meta` | `stopReason` | 新しい値 `protocol_end`（進行表の最後で自動で停止） |
+| `frames` | `protocolSec`・`label`・`stage`・`step`・`segmentIndex`・`screen` | そのフレームの、t = 0 からの秒と、進行表の区間（`label` は区間の名前、`stage` は `prep`／`nod`／`guide`／`transition`／`hold`／`done`、`step` は CVAカメラと同じ番号、`screen` は `mark`／`reading`）。進行表なしでは `null` |
+| `events` | `sync_tone_start` | 開始の音の鳴り始め（`t` ＝ `meta.sync.t0`）と検出の情報 |
+| `events` | `manual_start` | 手動のカウントダウンの 0（`t` ＝ `meta.sync.t0`） |
+| `events` | `sync_tone_end` | 終了の音が聞こえた（鳴り始めの時刻）。停止の判定には使わない |
+| `events` | `sync_tone_start_heard` | 記録中に開始の音が聞こえた（手動で始めた場合など。時刻合わせの参考） |
+| `events` | `stage` | 区間が変わった：`label`・`stage`・`step`・`index`・`plannedSec`（表の時刻）・`sec`（実際の時刻） |
+| `events` | `mic_start` | マイクの設定（`settings`） |
+
+**2台の時刻合わせ**：音の合図なら、posture-lab の `meta.sync.t0` と CVAカメラの `sync_tone_start` が同じ瞬間（音が空気を伝わる時間と、出力・入力の遅れの数十 ms を除く）。手動のときは数秒ずれうるので、うなずきと相互相関で合わせる。
 
 ## 0.3.2 で変わったもの
 

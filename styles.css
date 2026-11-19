@@ -27,3 +27,22 @@ html.recording body{position:fixed;left:0;right:0;width:100%}
 #endRecord{position:relative;overflow:hidden}
 .rec-stop.holding::after,#endRecord.holding::after{width:100%;transition:width 2s linear}
 .quality.warn{background:#fff7e3;color:#735715;border:2px solid #d5bb80}
+
+/* 0.4.0：合図待ちの画面（実験者が条件と進行表を確かめる。被験者には「このまま待つ」） */
+html.waiting,html.waiting body{overflow:hidden;overscroll-behavior:none}
+.wait-overlay{position:fixed;inset:0;z-index:55;background:#102c36;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px 20px calc(20px + env(safe-area-inset-bottom));text-align:center;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.wait-overlay[hidden]{display:none}
+.wait-cond{font-size:clamp(28px,8.5vw,44px);font-weight:800;margin:0;letter-spacing:.02em}
+.wait-proto{font-size:clamp(16px,4.6vw,22px);font-weight:700;margin:0;color:#ffd34d}
+.wait-big{font-size:clamp(18px,5.4vw,26px);font-weight:800;margin:14px 0 4px}
+.wait-method{display:flex;gap:0;border:1px solid #6d8c96;border-radius:12px;overflow:hidden}
+.wait-method button{min-height:44px;border:0;border-radius:0;background:transparent;color:#cfe0e4;padding:8px 22px}
+.wait-method button.sel{background:#7fd3c4;color:#102c36}
+.wait-status{font-size:13px;color:#b6c9ce;margin:0;max-width:30em;min-height:2.6em}
+.wait-count{font-size:clamp(90px,34vw,160px);font-weight:800;line-height:1;color:#ffd34d;font-variant-numeric:tabular-nums}
+.wait-count[hidden]{display:none}
+.wait-cancel{background:transparent;color:#b6c9ce;border-color:#4c6a73;min-height:40px;font-size:13px}
+#waitManualStart.holding::after{width:100%;transition:width 2s linear}
+
+/* 0.4.0：進行表のあいだは中央の目印と案内だけ（読書の文章は次の改修で） */
+.record-overlay[data-screen="mark"] .rec-reading{display:none}

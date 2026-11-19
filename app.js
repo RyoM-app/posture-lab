@@ -1,7 +1,10 @@
 import {rad,deg,clamp,median,sd,mean,faceRotation,headInclination,headInclinationFromUp,measureIris,upFromOrientation,upFromGravity,IRIS_POINTS} from './geometry.js';
 import {READING_VERSION,READING_PAGES} from './reading.js';
 import './protocol.js';   // 進行表（CVAカメラと同じファイル）。window.POSTURE_PROTOCOL
+import {ToneDetector} from './tone-detect.js';
 const PP=window.POSTURE_PROTOCOL;
+// 0.4.0：開始の合図。音の合図＝CVAカメラの開始の音をマイクで聞く。手動＝待機画面を2秒長押し → 10秒のカウントダウン → 0 で開始
+const SYNC={countdownSec:10,toneSamples:2048};
 
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const MP_VERSION='1.0.1';
@@ -51,11 +54,12 @@ function focal(){
 //   左右 = atan2(u_x, u_y)（＋：上端が左に傾く、画面を見て）、前後 = atan2(u_z, u_y)（＋：画面が上を向く＝上端が奥へ倒れる）
 function deviceTilt(up){if(!up)return null;return {lr:deg(Math.atan2(up[0],up[1])),fb:deg(Math.atan2(up[2],up[1]))};}
 // ---- 被験者・条件・回（前回の値を覚える）
-const SUBJECT_KEY='posture-lab.subject.v1',HOLD_FOR={fixed:'stand',hand:'hand'};
+const SUBJECT_KEY='posture-lab.subject.v1',HOLD_FOR={fixed:'stand',hand:'hand'},KIND_FOR={fixed:'stand',hand:'dual'};
 function subjectForm(){return {id:$('subjId').value.trim().toUpperCase(),condition:$('condition').value,run:Number($('runNo').value)||null,memo:$('memo').value.trim()};}
 function checkSubject(f){if(!/^P\d{2}$/.test(f.id))return '被験者IDを P01 の形（Pと数字2桁）で入力してください。';if(!(f.run>=1))return '回番号を1以上で入力してください。';return null;}
 function restoreSubject(){try{const f=JSON.parse(localStorage.getItem(SUBJECT_KEY));if(f){$('subjId').value=f.id||'';$('condition').value=f.condition||'fixed';$('runNo').value=f.run||1;$('memo').value=f.memo||'';}}catch{}}
-function applyCondition(){const m=HOLD_FOR[$('condition').value];if(m)$('holdMode').value=m;}
+function applyCondition(){const m=HOLD_FOR[$('condition').value];if(m)$('holdMode').value=m;const k=KIND_FOR[$('condition').value];if(k)$('protocolKind').value=k;updateRecordButton();}
+function updateRecordButton(){$('record').textContent=$('protocolKind').value==='none'?'記録開始':'合図待ちにする';}
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error);}
 function event(type,detail={}){if(state.recording)state.session.events.push({t:performance.now(),type,...detail});}
 function config(){return {hfov:Number($('hfov').value),irisMm:Number($('irisMm').value),...modelConfig()};}
@@ -276,6 +280,11 @@ function consume(result,p){
     if(!sw.moved&&standFromStart>QUALITY.standMoveDeg){sw.moved=true;sw.count++;event('stand_moved',{angleDeg:standFromStart,source:imuSource,reference:'record_start'});}
     else if(sw.moved&&standFromStart<QUALITY.standReturnDeg){sw.moved=false;event('stand_returned',{angleDeg:standFromStart,source:imuSource,reference:'record_start'});}
   }
+  // 0.4.0：進行表の区間（自分の時計で、開始の合図からの秒で決める。正式な区間は解析で CVAカメラ側と合わせる）
+  const tt=state.recording?state.timetable:null;
+  if(tt){const sec=(p.t-tt.t0)/1000,at=PP.segmentAt(tt.sch,sec);row.protocolSec=sec;row.label=at.seg?.label??(at.phase==='lead'?'準備':'終了');
+    row.stage=at.seg?(at.seg.nod?'nod':at.phase):(at.phase==='lead'?'prep':'done');row.step=at.seg?.step??null;row.segmentIndex=at.seg?.index??null;row.screen=state.screen??'mark';}
+  else if(state.recording){row.protocolSec=null;row.label=null;row.stage=null;row.step=null;row.segmentIndex=null;row.screen=state.screen??'mark';}
   state.latest=row;
   draw(result.landmarks);updateSetup(row,iris);
   if(state.recording){state.session.frames.push(row);state.dirty=true;}
@@ -297,7 +306,7 @@ function consume(result,p){
   $('baseline').disabled=!irisValid||!!state.collect||state.recording||state.recordStarting;
   $('calibrate').disabled=!irisValid||!!state.collect||state.recording||state.recordStarting;
   $('clearCalibration').disabled=!state.calibration||state.recording||state.recordStarting||!!state.collect;
-  $('record').disabled=!state.baseline||state.recording||state.recordStarting||state.awaitingNext||!!state.collect;
+  $('record').disabled=!state.baseline||state.recording||state.recordStarting||state.awaitingNext||!!state.collect||!!state.waiting;
   collectFrame(row);
 }
 function draw(lm){
@@ -479,7 +488,7 @@ function invalidate(message){
 window.addEventListener('orientationchange',()=>{if(state.running)invalidate('端末の縦横が変わりました。縦持ちに戻し、基準を取り直してください。');});
 screen.orientation?.addEventListener('change',()=>{if(state.running)invalidate('画面の向きが変わりました。縦持ちで基準を取り直してください。');});
 document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){if(state.recording)endRecord('page_hidden');state.collect=null;clearValues();}
+  if(document.hidden){if(state.waiting)cancelWaiting('page_hidden');if(state.recording)endRecord('page_hidden');state.collect=null;clearValues();}
   else if(state.running){status('画面に戻りました。記録は自動再開しません。必要に応じて基準を取り直してください。');wake();}
 });
 for(const id of ['hfov','irisMm'])$(id).addEventListener('change',()=>{
@@ -529,7 +538,7 @@ async function writeCheckpoint(reset){
   }catch{state.storageOK=false;}
   finally{state.saveBusy=false;}
 }
-function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance','holdMode','targetDistance','squareMm','subjId','condition','runNo','memo'])$(id).disabled=locked;$('calibStart').disabled=locked||!state.running;}
+function lockSettings(locked){for(const id of ['hfov','irisMm','knownDistance','holdMode','targetDistance','squareMm','subjId','condition','runNo','memo','protocolKind','startMethod'])$(id).disabled=locked;$('calibStart').disabled=locked||!state.running;}
 $('record').addEventListener('click',()=>{
   if(state.recording||state.recordStarting||!state.running||!state.baseline)return;
   const subj=subjectForm(),bad=checkSubject(subj);if(bad){status(bad,true);return;}
@@ -544,7 +553,8 @@ function dismissNextRecord(){state.awaitingNext=false;$('nextRecordPanel').hidde
 $('cancelNextRecord').addEventListener('click',dismissNextRecord);
 $('continueRecord').addEventListener('click',()=>{dismissNextRecord();startRecording();});
 async function startRecording(){
-  if(state.recording||state.recordStarting||!state.running||!state.baseline||state.collect)return;
+  if(state.recording||state.recordStarting||state.waiting||!state.running||!state.baseline||state.collect)return;
+  prepareAudio();   // 押した操作の中で音を使えるようにする（iOS）
   state.recordStarting=true;$('record').disabled=true;$('continueRecord').disabled=true;
   $('sessionSelect').disabled=true;$('exportCsv').disabled=true;$('exportJson').disabled=true;
   const generation=state.generation,baseline=state.baseline;
@@ -562,31 +572,36 @@ async function startRecording(){
       await archiveSession(recoveredSession());
     }
     if(!state.running||document.hidden||generation!==state.generation||state.baseline!==baseline)return;
-    beginSession();
-    // A checkpoint failure must not suspend live capture or leave the UI locked.
-    checkpoint(true);updateRecording();if(state.session.meta.baselineAgeSec<QUALITY.baselineMaxAgeSec)status('新しい記録を開始しました。');
+    if($('protocolKind').value==='none'){beginSession();afterBegin();}
+    else enterWaiting();   // 0.4.0：合図待ち（音の合図か、手動のカウントダウンで beginSession）
   }catch(e){status(`次の記録を開始できませんでした：${e.message} 前の記録は保持しています。CSV／JSONを保存できます。`,true);}
   finally{
     state.recordStarting=false;$('continueRecord').disabled=false;refreshSessionSelect();
     $('exportCsv').disabled=state.recording||!selectedSession();$('exportJson').disabled=state.recording||!selectedSession();
   }
 }
-function beginSession(){
+function afterBegin(){
+  // A checkpoint failure must not suspend live capture or leave the UI locked.
+  checkpoint(true);updateRecording();if(state.session.meta.baselineAgeSec<QUALITY.baselineMaxAgeSec)status('新しい記録を開始しました。');
+}
+function beginSession(sync=null){
   const subject=subjectForm(),stamp=new Date().toISOString().replace(/[:.]/g,'-');
   try{localStorage.setItem(SUBJECT_KEY,JSON.stringify(subject));}catch{}
   // ファイル名：P01_fixed1_posture_<時刻>
   const id=checkSubject(subject)?`posture-${stamp}`:`${subject.id}_${subject.condition}${subject.run}_posture_${stamp}`;
   const clock={dateNowMs:Date.now(),perfNowMs:performance.now(),timeOrigin:performance.timeOrigin,note:'記録開始時の Date.now() と performance.now() の組。2台の時計のずれを後で見積もるため'};
   state.session={meta:{id,version:APP_VERSION,subject,clock,createdAt:new Date().toISOString(),exports:{},timeOrigin:performance.timeOrigin,start:performance.now(),browser:navigator.userAgent,mediapipeVersion:MP_VERSION,model:MODEL,settings:state.cameraSettings,inference:state.mode,config:config(),baseline:{...state.baseline},distanceCalibration:state.calibration?{...state.calibration}:null,
-    protocolVersion:PP.PROTOCOL_VERSION,timetable:PP.buildSchedule($('holdMode').value==='hand'?'dual':'stand'),
+    protocolVersion:PP.PROTOCOL_VERSION,protocolKind:sync?.kind??'none',timetable:sync?sync.sch:null,startMethod:sync?.method??'button',
+    sync:sync?{method:sync.method,t0:sync.t0,t0WallMs:Date.now()-(performance.now()-sync.t0),detail:sync.detail??null,mic:state.mic?.settings??null}:null,
     holdMode:$('holdMode').value,setup:state.baseline?.setup??null,focal:(()=>{const f=focal();return {focalPx:f.f,source:f.source,resolutionMismatch:!!f.mismatch};})(),cameraCalibration:(()=>{const c=loadCameraCalibration();if(!c)return null;const{views,...rest}=c;return rest;})(),
     units:{time:'milliseconds relative to performance.timeOrigin',videoTime:'seconds in video timeline; not hardware exposure timestamp',angles:'degrees',distance:'cm',iris:'source image px',acceleration:'m/s^2',rotationRate:'deg/s'},
     limitations:['unvalidated prototype','portrait front camera only','orientation matched by latest receive time, not hardware synchronization','provisional CVA model is not an observed anatomical CVA','iris distance does not separate phone motion from head motion'],qualityRules:{orientationMaxAgeMs:250,yawMaxDeg:25,pitchMaxDeg:40,rollMaxDeg:25,irisMinPx:5,minEyeAspectRatio:.12,minLeftRightRatio:.65}},frames:[],motion:[],orientation:[],events:[],inputs:recentInputs()};
   state.saved={frames:0,motion:0,orientation:0,events:0,inputs:0};state.chunk=1;state.standWatch={moved:false,count:0,max:0,maxAtSec:null,ref:null,acc:[0,0,0],n:0};$('qualityBox').hidden=true;
   const bAge=(state.session.meta.start-state.baseline.t)/1000;state.session.meta.baselineAgeSec=bAge;
-  state.recording=true;state.dirty=true;event('record_start',{baselineAgeSec:bAge});lockSettings(true);wake();   // 記録中は画面を消さない
+  state.timetable=sync?{sch:sync.sch,t0:sync.t0,method:sync.method,lastKey:null}:null;state.screen='mark';
+  state.recording=true;state.dirty=true;event('record_start',{baselineAgeSec:bAge});
+  if(sync)event(sync.method==='tone'?'sync_tone_start':'manual_start',{t:sync.t0,wallMs:state.session.meta.sync.t0WallMs,...(sync.detail??{})});lockSettings(true);wake();   // 記録中は画面を消さない
   if(bAge>=QUALITY.baselineMaxAgeSec){event('baseline_stale',{baselineAgeSec:bAge});status(`基準（「この姿勢を基準にする」）が ${(bAge/60).toFixed(0)}分前のものです。この回を止めて、基準を取り直してから記録してください。`,true);}
-  state.session.meta.reading={version:READING_VERSION,pageSec:READING.pageSec,pages:READING_PAGES.length,text:READING_PAGES};
   setRecordingScreen(true,bAge>=QUALITY.baselineMaxAgeSec?bAge:null);
   $('record').disabled=true;$('endRecord').disabled=false;
   $('exportCsv').disabled=true;$('exportJson').disabled=true;
@@ -663,6 +678,9 @@ function endRecord(reason='user'){
   lockSettings(false);$('endRecord').disabled=true;$('exportCsv').disabled=false;$('exportJson').disabled=false;
   refreshSessionSelect();updateSaveStatus();
   checkpoint();updateRecording();
+  const tt=state.timetable;state.timetable=null;
+  if(reason==='protocol_end'){const s=state.session;archiveSession(s).then(()=>status('進行表の最後まで進み、自動で停止しました。端末内に保存しました。CSV・JSON は「計測CSVを保存」「全記録JSONを保存」で書き出してください。')).catch(e=>status(`自動で停止しましたが、端末内への保存に失敗しました：${e.message} すぐに CSV・JSON を書き出してください。`,true));}
+  if(tt)stopMic();
 }
 longPress($('endRecord'),()=>endRecord());longPress($('overlayStop'),()=>endRecord());
 // ---- 記録中の画面（0.2.1）：スクロールを止め、「画面に触れないでください」を表示。停止は1秒の長押し
@@ -680,9 +698,7 @@ function setRecordingScreen(on,staleSec=null){
   const ov=$('recordOverlay');
   clearInterval(state.readingTimer);
   if(on){savedScrollY=window.scrollY;document.body.style.top=`-${savedScrollY}px`;document.documentElement.classList.add('recording');ov.hidden=false;
-    let k=0;const show=()=>{const page=k%READING_PAGES.length;$('readingText').textContent=READING_PAGES[page];$('readingPage').textContent=`${page+1} / ${READING_PAGES.length}`;
-      event('reading_page',{page,loop:Math.floor(k/READING_PAGES.length),wallMs:Date.now()});k++;};
-    show();state.readingTimer=setInterval(()=>{if(state.recording)show();},READING.pageSec*1000);
+    setScreen('mark');
     $('overlayWarn').hidden=staleSec===null;if(staleSec!==null)$('overlayWarn').textContent=`基準が ${(staleSec/60).toFixed(0)}分前のものです。停止して、基準を取り直してください。`;}
   else if(!ov.hidden){document.documentElement.classList.remove('recording');document.body.style.top='';ov.hidden=true;window.scrollTo(0,savedScrollY);}
 }
@@ -782,4 +798,88 @@ $('recover').addEventListener('click',()=>{
   download(`${result.meta.id}-recovered.json`,JSON.stringify(result),'application/json');
 });
 window.addEventListener('beforeunload',e=>{if(state.dirty){e.preventDefault();e.returnValue='';}});
+// ---- 0.4.0：合図待ち・音の合図・手動のカウントダウン・進行表で進める
+function prepareAudio(){try{state.actx??=new (window.AudioContext||window.webkitAudioContext)();if(state.actx.state==='suspended')state.actx.resume();}catch{/* 音は任意 */}}
+async function startMic(){
+  if(state.mic)return state.mic;
+  prepareAudio();const ctx=state.actx;if(!ctx)throw Error('音を扱えません');
+  const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  const src=ctx.createMediaStreamSource(stream),sink=ctx.createGain();sink.gain.value=0;sink.connect(ctx.destination);
+  const det=new ToneDetector(ctx.sampleRate,{start:PP.TONES.start.map(x=>x[0]),end:PP.TONES.end.map(x=>x[0])});
+  const onChunk=(samples,tEnd)=>{for(const h of det.push(samples,tEnd))onTone(h);};
+  let node,mode;
+  try{await ctx.audioWorklet.addModule('tone-worklet.js?v=0.4.0');node=new AudioWorkletNode(ctx,'tone-tap');mode='audioworklet';
+    // 塊の最後の標本の時刻 ＝ いま −（音の時計の現在 − その標本の時刻）
+    node.port.onmessage=e=>onChunk(e.data.samples,performance.now()-(ctx.currentTime-e.data.endFrame/ctx.sampleRate)*1000);}
+  catch{node=ctx.createScriptProcessor(SYNC.toneSamples,1,1);mode='scriptprocessor';node.onaudioprocess=e=>onChunk(Float32Array.from(e.inputBuffer.getChannelData(0)),performance.now());}
+  src.connect(node);node.connect(sink);
+  const tr=stream.getAudioTracks()[0];
+  state.mic={stream,src,node,sink,det,settings:{...tr.getSettings(),label:tr.label,sampleRate:ctx.sampleRate,mode}};
+  event('mic_start',{settings:state.mic.settings});
+  return state.mic;
+}
+function stopMic(){const m=state.mic;if(!m)return;state.mic=null;try{m.src.disconnect();m.node.disconnect();m.sink.disconnect();}catch{}m.stream.getTracks().forEach(t=>t.stop());}
+function onTone(h){
+  const w=state.waiting;
+  (state.toneLog??=[]).push({...h,at:performance.now(),state:w?'waiting':state.recording?'recording':'idle'});
+  if(w&&h.pattern==='start'&&w.method==='tone'&&!w.countdown){startFromSync('tone',h.onsetMs,{detection:h});return;}
+  if(state.recording){
+    if(h.pattern==='end')event('sync_tone_end',{t:h.onsetMs,detectedAt:h.detectedMs,lengths:h.lengths,gaps:h.gaps});
+    else event('sync_tone_start_heard',{t:h.onsetMs,detectedAt:h.detectedMs,lengths:h.lengths,gaps:h.gaps});   // 手動で始めたあとに聞こえた開始の音など（時刻合わせの参考）
+  }
+}
+const condText=s=>`${s.id||'（IDなし）'}・${{fixed:'固定',hand:'手持ち',practice:'練習'}[s.condition]||s.condition}・${s.run??'?'}回目`;
+const fmtDur=sec=>`${Math.floor(sec/60)}分${String(Math.round(sec%60)).padStart(2,'0')}秒`;
+function enterWaiting(){
+  const kind=$('protocolKind').value,sch=PP.buildSchedule(kind),subj=subjectForm();
+  state.waiting={kind,sch,method:$('startMethod').value,enteredAt:performance.now(),countdown:null,timers:[]};
+  lockSettings(true);wake();
+  $('waitCond').textContent=condText(subj);$('waitProto').textContent=`進行表 ${sch.protocolVersion}：${PP.NAMES[kind]}（全${fmtDur(sch.total)}）`;
+  $('waitCount').hidden=true;$('waitOverlay').hidden=false;document.documentElement.classList.add('waiting');
+  updateWaitUI();
+  startMic().then(()=>updateWaitUI()).catch(e=>{state.micError=e.message||String(e);updateWaitUI();});
+  state.waiting.timers.push(setInterval(updateWaitUI,250));
+}
+function updateWaitUI(){
+  const w=state.waiting;if(!w)return;
+  $('waitTone').classList.toggle('sel',w.method==='tone');$('waitManual').classList.toggle('sel',w.method==='manual');
+  const lv=state.mic?.det.level,db=lv>0?20*Math.log10(lv):null;
+  const meter=state.mic?`マイク入力 ${db===null?'—':db.toFixed(0)+' dB'}`:state.micError?`マイクを使えません（${state.micError}）`:'マイクを準備しています…';
+  $('waitStatus').textContent=w.countdown?'カウントダウン中です。0 で CVAカメラの記録スタートを押してください。'
+    :w.method==='tone'?(state.mic?`CVAカメラの開始の音を待っています（${meter}）。`:`${meter}。手動で開始してください。`)
+    :`手動：下のボタンを2秒長押しすると、${SYNC.countdownSec}秒のカウントダウンが始まります（${meter}）。`;
+}
+function setWaitMethod(m){const w=state.waiting;if(!w||w.countdown)return;w.method=m;$('startMethod').value=m;updateWaitUI();}
+function startCountdown(){
+  const w=state.waiting;if(!w||w.countdown)return;
+  w.method='manual';const tEnd=performance.now()+SYNC.countdownSec*1000;w.countdown={tEnd,startedAt:performance.now()};
+  $('waitCount').hidden=false;let last=null;
+  const tick=()=>{if(state.waiting!==w)return;const left=Math.ceil((tEnd-performance.now())/1000);
+    if(left!==last&&left>0){last=left;$('waitCount').textContent=left;beep(1000,80,.2);}
+    if(performance.now()>=tEnd-2){startFromSync('manual',tEnd,{countdownSec:SYNC.countdownSec});return;}
+    w.timers.push(setTimeout(tick,Math.min(50,Math.max(0,tEnd-performance.now()))));};
+  tick();updateWaitUI();
+}
+function clearWait(){const w=state.waiting;if(!w)return null;w.timers.forEach(id=>{clearTimeout(id);clearInterval(id);});state.waiting=null;$('waitOverlay').hidden=true;document.documentElement.classList.remove('waiting');return w;}
+function cancelWaiting(reason='user'){const w=clearWait();if(!w)return;stopMic();lockSettings(false);status(reason==='page_hidden'?'画面が隠れたので、合図待ちをやめました。':'合図待ちをやめました。');refreshSessionSelect();}
+function startFromSync(method,t0,detail){
+  const w=clearWait();if(!w)return;
+  if(method==='manual')beep(1600,250,.25);
+  beginSession({method,t0,kind:w.kind,sch:w.sch,detail:{...detail,waitedSec:(performance.now()-w.enteredAt)/1000}});afterBegin();
+  status(method==='tone'?'開始の音を聞きました。進行表で記録しています。':'カウントダウンで開始しました。進行表で記録しています。');
+}
+$('waitTone').addEventListener('click',()=>setWaitMethod('tone'));$('waitManual').addEventListener('click',()=>setWaitMethod('manual'));
+$('waitCancel').addEventListener('click',()=>cancelWaiting());
+longPress($('waitManualStart'),startCountdown);
+$('protocolKind').addEventListener('change',updateRecordButton);
+// 進行表の区間を進め、画面を切り替え、最後に自動で停止する
+function setScreen(kind){state.screen=kind;$('recordOverlay').dataset.screen=kind;}
+setInterval(()=>{
+  const tt=state.recording?state.timetable:null;if(!tt)return;
+  const sec=(performance.now()-tt.t0)/1000,at=PP.segmentAt(tt.sch,sec),key=at.seg?`${at.seg.index}:${at.phase}`:at.phase;
+  if(key!==tt.lastKey){tt.lastKey=key;const g=at.seg;
+    event('stage',{label:g?.label??null,stage:g?(g.nod?'nod':at.phase):(at.phase==='lead'?'prep':'done'),step:g?.step??null,index:g?.index??null,plannedSec:g?(at.phase==='hold'?g.holdStart:at.phase==='transition'?g.transStart:g.guideStart):null,sec});
+  }
+  if(sec>=tt.sch.stopAt)endRecord('protocol_end');
+},20);
 window.__pl=state;   // 動作確認用
